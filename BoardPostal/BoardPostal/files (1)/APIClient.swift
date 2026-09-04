@@ -1,0 +1,332 @@
+import Foundation
+
+// MARK: - APIClient
+// URLSession-based HTTP client that mirrors the Axios JWT interceptor behaviour:
+// - Attaches Bearer token to every request automatically
+// - On 401: refreshes token once, retries the original request
+// - On refresh failure: broadcasts logout notification
+
+final class APIClient {
+    static let shared = APIClient()
+    private init() {}
+
+    private let keychain = KeychainService.shared
+    private var isRefreshing = false
+    private var pendingRequests: [CheckedContinuation<Void, Error>] = []
+
+    // MARK: - Core request method
+    func request<T: Decodable>(
+        _ endpoint: APIEndpoint,
+        method: HTTPMethod = .get,
+        body: Encodable? = nil,
+        requiresAuth: Bool = true
+    ) async throws -> T {
+        let data = try await performRequest(endpoint, method: method, body: body, requiresAuth: requiresAuth)
+        return try decode(T.self, from: data)
+    }
+
+    // Void response variant (for DELETE etc.)
+    func requestVoid(
+        _ endpoint: APIEndpoint,
+        method: HTTPMethod = .delete,
+        body: Encodable? = nil,
+        requiresAuth: Bool = true
+    ) async throws {
+        _ = try await performRequest(endpoint, method: method, body: body, requiresAuth: requiresAuth)
+    }
+
+    // MARK: - Internal request performer
+    private func performRequest(
+        _ endpoint: APIEndpoint,
+        method: HTTPMethod,
+        body: Encodable?,
+        requiresAuth: Bool,
+        isRetry: Bool = false
+    ) async throws -> Data {
+        var request = URLRequest(url: endpoint.url)
+        request.httpMethod = method.rawValue
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 30
+
+        // Attach JWT
+        if requiresAuth, let token = keychain.accessToken {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        // Encode body
+        if let body {
+            request.httpBody = try JSONEncoder.bpEncoder.encode(body)
+        }
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw APIError.invalidResponse
+        }
+
+        switch httpResponse.statusCode {
+        case 200...299:
+            return data
+
+        case 401 where requiresAuth && !isRetry:
+            // Token expired — refresh and retry
+            try await refreshTokens()
+            return try await performRequest(
+                endpoint, method: method, body: body,
+                requiresAuth: requiresAuth, isRetry: true
+            )
+
+        case 401 where requiresAuth:
+            // Refresh also failed — force logout
+            await triggerLogout()
+            throw APIError.unauthorized
+
+        case 401:
+            // Wrong credentials on login/register — just report it
+            let message = parseErrorMessage(from: data) ?? "Invalid email or password."
+            throw APIError.badRequest(message)
+
+        case 400:
+            let message = parseErrorMessage(from: data) ?? "Invalid request."
+            throw APIError.badRequest(message)
+
+        case 403:
+            throw APIError.forbidden
+
+        case 404:
+            throw APIError.notFound
+
+        case 409:
+            let message = parseErrorMessage(from: data) ?? "Conflict."
+            throw APIError.conflict(message)
+
+        case 422:
+            let message = parseErrorMessage(from: data) ?? "Validation failed."
+            throw APIError.validationError(message)
+
+        case 500...599:
+            throw APIError.serverError(httpResponse.statusCode)
+
+        default:
+            throw APIError.unknown(httpResponse.statusCode)
+        }
+    }
+
+    // MARK: - Token refresh (single-flight)
+    private func refreshTokens() async throws {
+        if isRefreshing {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                pendingRequests.append(continuation)
+            }
+            return
+        }
+
+        isRefreshing = true
+        defer { isRefreshing = false }
+
+        guard let refreshToken = keychain.refreshToken else {
+            await triggerLogout()
+            resumePendingRequests(with: .failure(APIError.unauthorized))
+            throw APIError.unauthorized
+        }
+
+        do {
+            let body = RefreshRequest(refreshToken: refreshToken)
+            var request = URLRequest(url: APIEndpoint.refresh.url)
+            request.httpMethod = HTTPMethod.post.rawValue
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONEncoder.bpEncoder.encode(body)
+
+            let (data, response) = try await URLSession.shared.data(for: request)
+
+            guard let httpResponse = response as? HTTPURLResponse,
+                  httpResponse.statusCode == 200 else {
+                await triggerLogout()
+                resumePendingRequests(with: .failure(APIError.unauthorized))
+                throw APIError.unauthorized
+            }
+
+            let tokens = try decode(AuthTokensResponse.self, from: data)
+            keychain.saveTokens(
+                access: tokens.accessToken,
+                refresh: tokens.refreshToken,
+                userId: tokens.userId ?? keychain.userId ?? "",
+                email: tokens.email ?? keychain.email ?? ""
+            )
+            resumePendingRequests(with: .success(()))
+        } catch {
+            resumePendingRequests(with: .failure(error))
+            throw error
+        }
+    }
+
+    private func resumePendingRequests(with result: Result<Void, Error>) {
+        let waiters = pendingRequests
+        pendingRequests.removeAll()
+        for continuation in waiters {
+            continuation.resume(with: result)
+        }
+    }
+
+    // MARK: - Logout broadcast
+    @MainActor
+    private func triggerLogout() {
+        keychain.clearAll()
+        NotificationCenter.default.post(name: .bpForceLogout, object: nil)
+    }
+
+    // MARK: - Decode helper
+    private func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
+        do {
+            return try JSONDecoder.bpDecoder.decode(type, from: data)
+        } catch {
+            throw APIError.decodingError(error.localizedDescription)
+        }
+    }
+
+    // MARK: - Error message parser
+    private func parseErrorMessage(from data: Data) -> String? {
+        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        return json?["message"] as? String ?? json?["title"] as? String
+    }
+}
+
+// MARK: - Trip Entry helpers
+extension APIClient {
+    func updateEntry(
+        tripId: String,
+        entryId: String,
+        title: String?,
+        content: String
+    ) async throws -> TripEntry {
+        struct Body: Encodable {
+            let title: String?
+            let content: String
+        }
+        return try await request(
+            .entry(tripId: tripId, entryId: entryId),
+            method: .put,
+            body: Body(title: title, content: content)
+        )
+    }
+
+    func deleteEntry(tripId: String, entryId: String) async throws {
+        try await requestVoid(
+            .entry(tripId: tripId, entryId: entryId),
+            method: .delete
+        )
+    }
+
+    func updateDayItem(
+        tripId: String,
+        dayId: String,
+        itemId: String,
+        title: String,
+        type: String,
+        notes: String?,
+        time: String?
+    ) async throws -> TripDayItem {
+        struct Body: Encodable {
+            let title: String
+            let type: String
+            let notes: String?
+            let time: String?
+        }
+        return try await request(
+            .dayItem(tripId: tripId, dayId: dayId, itemId: itemId),
+            method: .put,
+            body: Body(title: title, type: type, notes: notes, time: time)
+        )
+    }
+}
+
+// MARK: - HTTP Method
+enum HTTPMethod: String {
+    case get    = "GET"
+    case post   = "POST"
+    case put    = "PUT"
+    case patch  = "PATCH"
+    case delete = "DELETE"
+}
+
+// MARK: - API Errors
+enum APIError: LocalizedError {
+    case invalidResponse
+    case unauthorized
+    case forbidden
+    case notFound
+    case badRequest(String)
+    case conflict(String)
+    case validationError(String)
+    case serverError(Int)
+    case decodingError(String)
+    case unknown(Int)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidResponse:      return "Invalid server response."
+        case .unauthorized:         return "Your session has expired. Please log in again."
+        case .forbidden:            return "You don't have permission to do this."
+        case .notFound:             return "Not found."
+        case .badRequest(let msg):  return msg
+        case .conflict(let msg):    return msg
+        case .validationError(let msg): return msg
+        case .serverError(let code): return "Server error (\(code)). Please try again."
+        case .decodingError(let msg): return "Data error: \(msg)"
+        case .unknown(let code):    return "Unexpected error (\(code))."
+        }
+    }
+}
+
+// MARK: - Shared JSON coders
+extension JSONEncoder {
+    static let bpEncoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        return encoder
+    }()
+}
+
+extension JSONDecoder {
+    static let bpDecoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            let str = try container.decode(String.self)
+            let isoFull = ISO8601DateFormatter()
+            isoFull.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if let date = isoFull.date(from: str) { return date }
+            let isoBasic = ISO8601DateFormatter()
+            isoBasic.formatOptions = [.withInternetDateTime]
+            if let date = isoBasic.date(from: str) { return date }
+            let dateOnly = DateFormatter()
+            dateOnly.dateFormat = "yyyy-MM-dd"
+            if let date = dateOnly.date(from: str) { return date }
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Cannot decode date: \(str)"
+            )
+        }
+        return decoder
+    }()
+}
+
+// MARK: - Notification names
+extension Notification.Name {
+    static let bpForceLogout = Notification.Name("bp.force.logout")
+    static let bpTripUpdated = Notification.Name("bp.trip.updated")
+}
+
+// MARK: - Internal DTOs for auth
+private struct RefreshRequest: Encodable {
+    let refreshToken: String
+}
+
+private struct AuthTokensResponse: Decodable {
+    let accessToken: String
+    let refreshToken: String
+    let userId: String?
+    let email: String?
+}
