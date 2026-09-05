@@ -14,6 +14,16 @@
 		9ABFFA042FAE000000A5B3B8 /* Inter-Italic-VariableFont_opsz,wght.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 9ABFF6D92FAD4FCC00A5B3B8 /* Inter-Italic-VariableFont_opsz,wght.ttf */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		BB0000010000000000000007 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 9A485D3E2F8C4F71009A93BD /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 9A485D452F8C4F71009A93BD;
+			remoteInfo = BoardPostal;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
 		9A485D462F8C4F71009A93BD /* BoardPostal.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BoardPostal.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		9A9C311B2FCE19C2001CABBD /* TEST_LOG.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = TEST_LOG.md; sourceTree = "<group>"; };
@@ -91,6 +101,7 @@
 		9ABFF6DA2FAD4FCC00A5B3B8 /* Inter-VariableFont_opsz,wght.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Inter-VariableFont_opsz,wght.ttf"; sourceTree = "<group>"; };
 		9ABFF6DB2FAD4FCC00A5B3B8 /* OFL.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = OFL.txt; sourceTree = "<group>"; };
 		9ABFF6DC2FAD4FCC00A5B3B8 /* README.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = README.txt; sourceTree = "<group>"; };
+		BB0000010000000000000001 /* BoardPostalTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = BoardPostalTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -112,10 +123,22 @@
 			path = BoardPostal;
 			sourceTree = "<group>";
 		};
+		BB0000010000000000000002 /* BoardPostalTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = BoardPostalTests;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		9A485D432F8C4F71009A93BD /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		BB0000010000000000000005 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -128,6 +151,7 @@
 		9A485D3D2F8C4F71009A93BD = {
 			isa = PBXGroup;
 			children = (
+				BB0000010000000000000002 /* BoardPostalTests */,
 				9A9C311B2FCE19C2001CABBD /* TEST_LOG.md */,
 				9ABFF68F2FAD4F3E00A5B3B8 /* Fonts */,
 				9A485D482F8C4F71009A93BD /* BoardPostal */,
@@ -139,6 +163,7 @@
 			isa = PBXGroup;
 			children = (
 				9A485D462F8C4F71009A93BD /* BoardPostal.app */,
+				BB0000010000000000000001 /* BoardPostalTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -281,6 +306,27 @@
 			productReference = 9A485D462F8C4F71009A93BD /* BoardPostal.app */;
 			productType = "com.apple.product-type.application";
 		};
+		BB0000010000000000000003 /* BoardPostalTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BB0000010000000000000009 /* Build configuration list for PBXNativeTarget "BoardPostalTests" */;
+			buildPhases = (
+				BB0000010000000000000004 /* Sources */,
+				BB0000010000000000000005 /* Frameworks */,
+				BB0000010000000000000006 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				BB0000010000000000000008 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				BB0000010000000000000002 /* BoardPostalTests */,
+			);
+			name = BoardPostalTests;
+			productName = BoardPostalTests;
+			productReference = BB0000010000000000000001 /* BoardPostalTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -293,6 +339,10 @@
 				TargetAttributes = {
 					9A485D452F8C4F71009A93BD = {
 						CreatedOnToolsVersion = 26.4;
+					};
+					BB0000010000000000000003 = {
+						CreatedOnToolsVersion = 26.4;
+						TestTargetID = 9A485D452F8C4F71009A93BD;
 					};
 				};
 			};
@@ -311,6 +361,7 @@
 			projectRoot = "";
 			targets = (
 				9A485D452F8C4F71009A93BD /* BoardPostal */,
+				BB0000010000000000000003 /* BoardPostalTests */,
 			);
 		};
 /* End PBXProject section */
@@ -328,6 +379,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		BB0000010000000000000006 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -338,7 +396,22 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		BB0000010000000000000004 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		BB0000010000000000000008 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 9A485D452F8C4F71009A93BD /* BoardPostal */;
+			targetProxy = BB0000010000000000000007 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		9A485D4F2F8C4F72009A93BD /* Debug */ = {
@@ -546,6 +619,36 @@
 			};
 			name = Release;
 		};
+		BB000001000000000000000A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				PRODUCT_BUNDLE_IDENTIFIER = com.boardpostal.ios.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/BoardPostal.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/BoardPostal";
+			};
+			name = Debug;
+		};
+		BB000001000000000000000B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				PRODUCT_BUNDLE_IDENTIFIER = com.boardpostal.ios.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/BoardPostal.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/BoardPostal";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -563,6 +666,15 @@
 			buildConfigurations = (
 				9A485D522F8C4F72009A93BD /* Debug */,
 				9A485D532F8C4F72009A93BD /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		BB0000010000000000000009 /* Build configuration list for PBXNativeTarget "BoardPostalTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BB000001000000000000000A /* Debug */,
+				BB000001000000000000000B /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

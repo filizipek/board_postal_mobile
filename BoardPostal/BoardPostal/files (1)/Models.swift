@@ -531,11 +531,10 @@ struct PublicTripDetail: Decodable, Identifiable {
 
 // MARK: - Paginated response wrapper
 struct PaginatedResponse<T: Decodable>: Decodable {
-    let items: [T]
-    let totalCount: Int
+    let total: Int
     let page: Int
     let pageSize: Int
-    let hasMore: Bool
+    let items: [T]
 }
 
 // MARK: - Generic message response
@@ -598,12 +597,25 @@ struct PublicTripCard: Codable, Identifiable {
     let owner: TripCardOwner
     let isFollowingAuthor: Bool
     let isSaved: Bool
+
+    var coverURL: URL? {
+        guard let coverPhotoUrl else { return nil }
+        return URL(string: coverPhotoUrl)
+    }
+
+    var destinationSummary: String {
+        guard let first = destinations.first else { return "Unknown destination" }
+        let firstName = [first.city, first.country]
+            .compactMap { $0 }
+            .joined(separator: ", ")
+        return destinations.count == 1
+            ? firstName
+            : "\(firstName) + \(destinations.count - 1) more"
+    }
 }
 
-// Generic paginated wrapper used by /users/{id}/trips, /me/saved, /me/following.
-// NOTE: an older `PaginatedResponse<T>` exists earlier in this file with a
-// different shape (totalCount / hasMore). This `Paginated<T>` matches the live
-// backend response: { total, page, pageSize, items }.
+// Codable variant used by /users/{id}/trips, /me/saved, /me/following.
+// It shares the live backend envelope: { total, page, pageSize, items }.
 struct Paginated<T: Codable>: Codable {
     let total: Int
     let page: Int

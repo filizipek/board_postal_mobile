@@ -1,0 +1,35 @@
+{
+  "total": 3,
+  "page": 2,
+  "pageSize": 2,
+  "items": [
+    {
+      "id": "10000000-0000-0000-0000-000000000011",
+      "title": "Alpine Weekend",
+      "coverPhotoUrl": "https://example.test/alps.jpg",
+      "coverPhotoAttribution": "Photo by Test User",
+      "coverPhotoAttributionUrl": "https://example.test/credit",
+      "createdAt": "2026-02-01T10:00:00Z",
+      "destinations": [{"id":"60000000-0000-0000-0000-000000000011","country":"Switzerland","city":"Zermatt","orderIndex":0}],
+      "entryCount": 4,
+      "placeCount": 2,
+      "owner": {"id":"00000000-0000-0000-0000-000000000011","fullName":"Alpine Owner","avatarUrl":"https://example.test/avatar.jpg","avatarId":"avatar-11"},
+      "isFollowingAuthor": true,
+      "isSaved": true
+    },
+    {
+      "id": "10000000-0000-0000-0000-000000000012",
+      "title": "Quiet Coast",
+      "coverPhotoUrl": null,
+      "coverPhotoAttribution": null,
+      "coverPhotoAttributionUrl": null,
+      "createdAt": "2026-01-20T08:30:00Z",
+      "destinations": [{"id":"60000000-0000-0000-0000-000000000012","country":"Portugal","city":null,"orderIndex":0}],
+      "entryCount": 0,
+      "placeCount": 0,
+      "owner": {"id":"00000000-0000-0000-0000-000000000012","fullName":"Coast Owner","avatarUrl":null,"avatarId":null},
+      "isFollowingAuthor": false,
+      "isSaved": false
+    }
+  ]
+}
