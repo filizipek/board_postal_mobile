@@ -40,15 +40,30 @@ struct RootView: View {
 
     var body: some View {
         Group {
-            if authStore.isAuthenticated {
-                RootTabView()
-                    .transition(.opacity)
+#if DEBUG
+            if let scenario = TripsVisualVerificationScenario.current {
+                NavigationStack {
+                    TripsVisualVerificationView(scenario: scenario)
+                }
             } else {
-                AuthFlowView()
-                    .transition(.opacity)
+                authenticatedContent
             }
+#else
+            authenticatedContent
+#endif
         }
         .animation(.easeInOut(duration: 0.25), value: authStore.isAuthenticated)
+    }
+
+    @ViewBuilder
+    private var authenticatedContent: some View {
+        if authStore.isAuthenticated {
+            RootTabView()
+                .transition(.opacity)
+        } else {
+            AuthFlowView()
+                .transition(.opacity)
+        }
     }
 }
 

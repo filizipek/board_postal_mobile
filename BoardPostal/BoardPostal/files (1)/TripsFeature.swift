@@ -69,16 +69,105 @@ final class TripViewModel: ObservableObject {
     }
 }
 
+enum TripCountText {
+    static func make(_ count: Int) -> String {
+        "\(count) \(count == 1 ? "trip" : "trips")"
+    }
+}
+
+#if DEBUG
+enum TripsVisualVerificationScenario: String {
+    case zero
+    case one
+    case two
+    case several
+
+    static var current: Self? {
+        let prefix = "--trips-visual-scenario="
+        guard let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix(prefix) }) else {
+            return nil
+        }
+        return Self(rawValue: String(argument.dropFirst(prefix.count)))
+    }
+
+    var trips: [Trip] {
+        switch self {
+        case .zero: []
+        case .one: Array(TripsVisualVerificationData.drafts.prefix(1))
+        case .two: Array(TripsVisualVerificationData.drafts.prefix(2))
+        case .several: TripsVisualVerificationData.drafts
+        }
+    }
+}
+
+enum TripsVisualVerificationData {
+    static let drafts: [Trip] = [
+        makeDraft(id: "draft-izmir", title: "A Slow Weekend Along the İzmir Waterfront", city: "İzmir", country: "Turkey", days: 1),
+        makeDraft(id: "draft-ordu", title: "Ordu Highlands and the Very Long Black Sea Coast Journey", city: "Ordu", country: "Turkey", days: 3),
+        makeDraft(id: "draft-copenhagen", title: "Copenhagen by Bicycle", city: "Copenhagen", country: "Denmark", days: 5),
+        makeDraft(id: "draft-san-francisco", title: "Neighborhood Notes from San Francisco", city: "San Francisco", country: "United States", days: 8)
+    ]
+
+    private static func makeDraft(id: String, title: String, city: String, country: String, days: Int) -> Trip {
+        Trip(
+            id: id,
+            title: title,
+            description: nil,
+            coverPhotoUrl: nil,
+            plannedStartDate: nil,
+            plannedEndDate: nil,
+            actualStartDate: nil,
+            actualEndDate: nil,
+            visibility: "Private",
+            country: country,
+            city: city,
+            isDraft: true,
+            isPlanning: false,
+            createdAt: Date(timeIntervalSince1970: 1_750_000_000),
+            ownerId: "visual-verification-owner",
+            entryCount: 0,
+            dayCount: days,
+            destinations: [TripDestination(id: "\(id)-destination", country: country, city: city, orderIndex: 0)]
+        )
+    }
+}
+
+struct TripsVisualVerificationView: View {
+    @StateObject private var viewModel: TripViewModel
+
+    init(scenario: TripsVisualVerificationScenario) {
+        let viewModel = TripViewModel()
+        viewModel.trips = scenario.trips
+        _viewModel = StateObject(wrappedValue: viewModel)
+    }
+
+    var body: some View {
+        TripsListView(viewModel: viewModel, automaticallyLoadsTrips: false)
+    }
+}
+#endif
+
 // MARK: - TripsListView
 
 struct TripsListView: View {
-    @StateObject private var viewModel = TripViewModel()
+    @StateObject private var viewModel: TripViewModel
+    private let automaticallyLoadsTrips: Bool
     @State private var showCreateTrip = false
     @State private var showDeleteAlert = false
     @State private var tripToDelete: Trip?
     @State private var tripToEdit: Trip? = nil
     @State private var showEditTrip = false
     @State private var toast: BPToast? = nil
+
+    init() {
+        _viewModel = StateObject(wrappedValue: TripViewModel())
+        automaticallyLoadsTrips = true
+    }
+
+    init(viewModel: TripViewModel, automaticallyLoadsTrips: Bool) {
+        _viewModel = StateObject(wrappedValue: viewModel)
+        self.automaticallyLoadsTrips = automaticallyLoadsTrips
+    }
 
     var body: some View {
         Group {
@@ -110,7 +199,7 @@ struct TripsListView: View {
                         baseColor: .bpInk
                     )
                     if !viewModel.trips.isEmpty {
-                        Text("\(viewModel.trips.count) trips")
+                        Text(TripCountText.make(viewModel.trips.count))
                             .font(.bpCaption)
                             .foregroundColor(.bpTextMuted)
                     }
@@ -160,7 +249,9 @@ struct TripsListView: View {
             Task { await viewModel.loadTrips() }
         }
         .task {
-            await viewModel.loadTrips()
+            if automaticallyLoadsTrips {
+                await viewModel.loadTrips()
+            }
         }
         .refreshable {
             await viewModel.loadTrips()
@@ -207,29 +298,27 @@ struct TripsListView: View {
                     BPSectionHeader(title: "Drafts")
                         .padding(.horizontal, 16)
                         .padding(.top, 24)
-                        .padding(.bottom, 12)
+                        .padding(.bottom, 18)
 
-                    ForEach(Array(viewModel.draftTrips.enumerated()), id: \.element.id) { index, trip in
-                        TripCard(
-                            trip: trip,
-                            onEdit: {
-                                tripToEdit = trip
-                                showEditTrip = true
-                            },
-                            onDelete: {
-                                tripToDelete = trip
-                                showDeleteAlert = true
-                            },
-                            onToggleDraft: {
-                                Task {
-                                    await viewModel.toggleDraft(trip: trip)
-                                    toast = BPToast(message: trip.isDraft ? "Trip published" : "Moved to drafts")
+                    LazyVStack(spacing: 12) {
+                        ForEach(viewModel.draftTrips) { trip in
+                            TripCard(
+                                trip: trip,
+                                onEdit: {
+                                    tripToEdit = trip
+                                    showEditTrip = true
+                                },
+                                onDelete: {
+                                    tripToDelete = trip
+                                    showDeleteAlert = true
+                                },
+                                onToggleDraft: {
+                                    Task {
+                                        await viewModel.toggleDraft(trip: trip)
+                                        toast = BPToast(message: trip.isDraft ? "Trip published" : "Moved to drafts")
+                                    }
                                 }
-                            }
-                        )
-
-                        if index < viewModel.draftTrips.count - 1 {
-                            BPDivider()
+                            )
                         }
                     }
                 }
@@ -249,37 +338,37 @@ struct TripCard: View {
 
     var body: some View {
         NavigationLink(destination: TripDetailView(trip: trip)) {
-            Color.clear
-                .frame(maxWidth: .infinity)
-                .frame(height: 240)
-                .background(
-                    Group {
-                        if let url = trip.coverURL {
-                            AsyncImage(url: url) { phase in
-                                switch phase {
-                                case .success(let img):
-                                    img.resizable().scaledToFill()
-                                default:
-                                    LinearGradient.bpCoverGradient(for: trip.id)
+            ZStack(alignment: .bottomLeading) {
+                Rectangle()
+                    .fill(Color.clear)
+                    .overlay {
+                        Group {
+                            if let url = trip.coverURL {
+                                AsyncImage(url: url) { phase in
+                                    switch phase {
+                                    case .success(let img):
+                                        img.resizable().scaledToFill()
+                                    default:
+                                        LinearGradient.bpCoverGradient(for: trip.id)
+                                    }
                                 }
+                            } else {
+                                LinearGradient.bpCoverGradient(for: trip.id)
                             }
-                        } else {
-                            LinearGradient.bpCoverGradient(for: trip.id)
                         }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .clipped()
                     }
-                    .clipped()
-                )
-                .overlay(alignment: .bottom) {
+
                     LinearGradient(
                         colors: [
                             Color.black.opacity(0.85),
-                            Color.black.opacity(0.0)
+                            Color.black.opacity(0.08)
                         ],
                         startPoint: .bottom,
                         endPoint: .init(x: 0.5, y: 0.4)
                     )
-                }
-                .overlay(alignment: .bottomLeading) {
+
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 6) {
                             if trip.isDraft {
@@ -305,8 +394,11 @@ struct TripCard: View {
                     }
                     .padding(.horizontal, 16)
                     .padding(.bottom, 16)
+                    .padding(.top, 24)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .frame(maxWidth: .infinity, minHeight: 240, alignment: .bottomLeading)
+                .clipped()
         }
         .buttonStyle(.plain)
         .shadow(color: Color.bpInk.opacity(0.1), radius: 8, x: 0, y: 2)
@@ -349,7 +441,8 @@ struct TripCard: View {
         if !parts.isEmpty {
             Text(parts.joined(separator: " · "))
                 .font(BPFont.inter(size: 11, weight: .regular))
-                .foregroundColor(.white.opacity(0.55))
+                .foregroundColor(.white.opacity(0.82))
+                .shadow(color: .black.opacity(0.45), radius: 1, x: 0, y: 1)
         }
     }
 }
@@ -4446,19 +4539,42 @@ struct InviteCollaboratorSheet: View {
             TripsListPreviewWrapper(mockTrips: mockTrips)
         }
     }
-    
-    private struct TripsListPreviewWrapper: View {
-        let mockTrips: [Trip]
-        @StateObject private var viewModel = TripViewModel()
-        
-        var body: some View {
-            TripsListView()
-                .onAppear {
-                    viewModel.trips = mockTrips
-                }
+
+#if DEBUG
+    #Preview("Drafts — One") {
+        NavigationStack {
+            TripsListPreviewWrapper(mockTrips: Array(TripsVisualVerificationData.drafts.prefix(1)))
         }
     }
+
+    #Preview("Drafts — Multiple") {
+        NavigationStack {
+            TripsListPreviewWrapper(mockTrips: TripsVisualVerificationData.drafts)
+        }
+    }
+
+    #Preview("Drafts — Accessibility") {
+        NavigationStack {
+            TripsListPreviewWrapper(mockTrips: TripsVisualVerificationData.drafts)
+        }
+        .environment(\.dynamicTypeSize, .accessibility3)
+    }
+#endif
     
+    private struct TripsListPreviewWrapper: View {
+        @StateObject private var viewModel: TripViewModel
+
+        init(mockTrips: [Trip]) {
+            let viewModel = TripViewModel()
+            viewModel.trips = mockTrips
+            _viewModel = StateObject(wrappedValue: viewModel)
+        }
+        
+        var body: some View {
+            TripsListView(viewModel: viewModel, automaticallyLoadsTrips: false)
+        }
+    }
+
     #Preview("Trip Detail") {
         let mockTrip = Trip(
             id: "1",
