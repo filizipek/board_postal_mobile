@@ -1,0 +1,20 @@
+{
+  "id": "30000000-0000-0000-0000-000000000001",
+  "dayNumber": 1,
+  "title": "Arrival",
+  "date": "2026-04-01",
+  "orderIndex": 0,
+  "items": [
+    {
+      "id": "40000000-0000-0000-0000-000000000001",
+      "type": "transport",
+      "title": "Airport transfer",
+      "notes": "Take the metro",
+      "time": "09:30",
+      "orderIndex": 0,
+      "placeId": null,
+      "placeName": null,
+      "placeCategory": null
+    }
+  ]
+}

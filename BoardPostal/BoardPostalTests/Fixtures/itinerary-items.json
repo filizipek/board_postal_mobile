@@ -1,0 +1,38 @@
+[
+  {
+    "id": "40000000-0000-0000-0000-000000000001",
+    "type": "place",
+    "title": "Galata Tower",
+    "notes": null,
+    "time": "10:00",
+    "orderIndex": 0,
+    "placeId": "50000000-0000-0000-0000-000000000001"
+  },
+  {
+    "id": "40000000-0000-0000-0000-000000000002",
+    "type": "transport",
+    "title": "Airport transfer",
+    "notes": "Take the metro",
+    "time": "09:30",
+    "orderIndex": 1,
+    "placeId": null
+  },
+  {
+    "id": "40000000-0000-0000-0000-000000000003",
+    "type": "accommodation",
+    "title": "Check in",
+    "notes": null,
+    "time": "15:00",
+    "orderIndex": 2,
+    "placeId": null
+  },
+  {
+    "id": "40000000-0000-0000-0000-000000000004",
+    "type": "note",
+    "title": "Pack an umbrella",
+    "notes": "Rain is forecast",
+    "time": null,
+    "orderIndex": 3,
+    "placeId": null
+  }
+]

@@ -1,0 +1,14 @@
+{
+  "type": "https://tools.ietf.org/html/rfc9110#section-15.5.1",
+  "title": "One or more validation errors occurred.",
+  "status": 400,
+  "errors": {
+    "Title": [
+      "'Title' must not be empty."
+    ],
+    "Time": [
+      "Time must be in HH:mm format."
+    ]
+  },
+  "traceId": "00-test-trace-id-00"
+}

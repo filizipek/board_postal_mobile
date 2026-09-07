@@ -555,6 +555,15 @@ final class TripDetailViewModel: ObservableObject {
 
 // MARK: - TripDetailView
 
+@MainActor
+protocol ItineraryAPIProviding {
+    func createDay(tripId: String, body: CreateDayRequest) async throws -> TripDay
+    func updateDay(tripId: String, dayId: String, body: UpdateDayRequest) async throws
+    func createDayItem(tripId: String, dayId: String, body: CreateDayItemRequest) async throws -> TripDayItem
+}
+
+extension APIClient: ItineraryAPIProviding {}
+
 struct TripDetailView: View {
     @StateObject private var viewModel: TripDetailViewModel
     @Environment(\.dismiss) private var dismiss
@@ -1595,13 +1604,24 @@ struct EntryDetailView: View {
     @MainActor
     final class ItineraryViewModel: ObservableObject {
         let tripId: String
+        private let api: any ItineraryAPIProviding
         @Published var days: [TripDay]
         @Published var isLoading = false
         @Published var error: String? = nil
         @Published var isAddingDay = false
+        @Published var isSavingItem = false
+        @Published var isUpdatingDay = false
 
         init(tripId: String, days: [TripDay]) {
             self.tripId = tripId
+            api = APIClient.shared
+            self.days = days.sorted {
+                $0.dayNumber < $1.dayNumber }
+        }
+
+        init(tripId: String, days: [TripDay], api: any ItineraryAPIProviding) {
+            self.tripId = tripId
+            self.api = api
             self.days = days.sorted {
                 $0.dayNumber < $1.dayNumber }
         }
@@ -1610,8 +1630,11 @@ struct EntryDetailView: View {
             days.sorted { $0.dayNumber < $1.dayNumber }
         }
 
-        func addDay() async {
+        @discardableResult
+        func addDay() async -> Bool {
+            guard !isAddingDay else { return false }
             isAddingDay = true
+            defer { isAddingDay = false }
             let nextNumber = (days.map {
                 $0.dayNumber }.max() ?? 0) + 1
             do {
@@ -1620,35 +1643,38 @@ struct EntryDetailView: View {
                     title: "Day \(nextNumber)",
                     date: nil,
                     orderIndex: nextNumber - 1)
-                let newDay: TripDay = try await
-                    APIClient.shared.request(
-                        .days(tripId: tripId),
-                        method: .post,
-                        body: body)
+                let newDay = try await api.createDay(tripId: tripId, body: body)
                 days.append(newDay)
+                return true
             } catch {
                 self.error = error.localizedDescription
+                return false
             }
-            isAddingDay = false
         }
 
         func updateDay(_ day: TripDay,
                        title: String,
                        date: String?) async {
+            isUpdatingDay = true
+            defer { isUpdatingDay = false }
             do {
                 let body = UpdateDayRequest(
                     title: title.isEmpty ? nil : title,
                     date: date,
                     orderIndex: nil)
-                let updated: TripDay = try await
-                    APIClient.shared.request(
-                        .day(tripId: tripId,
-                             dayId: day.id),
-                        method: .put,
-                        body: body)
+                try await api.updateDay(tripId: tripId, dayId: day.id, body: body)
                 if let i = days.firstIndex(
                     where: { $0.id == day.id }) {
-                    days[i] = updated
+                    let currentDay = days[i]
+                    days[i] = TripDay(
+                        id: currentDay.id,
+                        tripId: currentDay.tripId,
+                        dayNumber: currentDay.dayNumber,
+                        title: body.title ?? currentDay.title,
+                        date: body.date ?? currentDay.date,
+                        orderIndex: currentDay.orderIndex,
+                        items: currentDay.items
+                    )
                 }
             } catch {
                 self.error = error.localizedDescription
@@ -1666,13 +1692,24 @@ struct EntryDetailView: View {
             }
         }
 
+        @discardableResult
         func addItem(to day: TripDay,
                      type: String,
                      title: String,
                      notes: String?,
-                     time: String?) async {
+                     time: String?) async -> String? {
+            guard !isSavingItem else {
+                return "An itinerary item is already being saved."
+            }
+            guard let currentDay = days.first(where: { $0.id == day.id }) else {
+                let message = "This itinerary day is no longer available."
+                error = message
+                return message
+            }
+            isSavingItem = true
+            defer { isSavingItem = false }
             do {
-                let nextOrder = (day.items.map {
+                let nextOrder = (currentDay.items.map {
                     $0.orderIndex }.max() ?? -1) + 1
                 let body = CreateDayItemRequest(
                     type: type,
@@ -1681,12 +1718,11 @@ struct EntryDetailView: View {
                     time: time,
                     orderIndex: nextOrder,
                     placeId: nil)
-                let newItem: TripDayItem = try await
-                    APIClient.shared.request(
-                        .dayItems(tripId: tripId,
-                                  dayId: day.id),
-                        method: .post,
-                        body: body)
+                let newItem = try await api.createDayItem(
+                    tripId: tripId,
+                    dayId: day.id,
+                    body: body
+                )
                 if let i = days.firstIndex(
                     where: { $0.id == day.id }) {
                     let updatedDay = days[i]
@@ -1701,8 +1737,11 @@ struct EntryDetailView: View {
                         orderIndex: updatedDay.orderIndex,
                         items: items)
                 }
+                return nil
             } catch {
-                self.error = error.localizedDescription
+                let message = error.localizedDescription
+                self.error = message
+                return message
             }
         }
 
@@ -1728,8 +1767,9 @@ struct EntryDetailView: View {
                 items: items)
         }
 
+        @discardableResult
         func deleteItem(dayId: String,
-                        itemId: String) async {
+                        itemId: String) async -> String? {
             do {
                 try await APIClient.shared.requestVoid(
                     .dayItem(tripId: tripId,
@@ -1750,8 +1790,11 @@ struct EntryDetailView: View {
                         orderIndex: updatedDay.orderIndex,
                         items: items)
                 }
+                return nil
             } catch {
-                self.error = error.localizedDescription
+                let message = error.localizedDescription
+                self.error = message
+                return message
             }
         }
     }
@@ -1793,6 +1836,7 @@ struct EntryDetailView: View {
                         message: "Add your first day to"
                             + " start planning.",
                         actionTitle: "Add day",
+                        isLoading: viewModel.isAddingDay,
                         action: {
                             Task { await viewModel.addDay() }
                         }
@@ -1876,14 +1920,12 @@ struct EntryDetailView: View {
                 if let day = selectedDay {
                     AddDayItemSheet(day: day) {
                         type, title, notes, time in
-                        Task {
-                            await viewModel.addItem(
-                                to: day,
-                                type: type,
-                                title: title,
-                                notes: notes,
-                                time: time)
-                        }
+                        await viewModel.addItem(
+                            to: day,
+                            type: type,
+                            title: title,
+                            notes: notes,
+                            time: time)
                     }
                     .presentationDetents([.medium, .large])
                     .presentationDragIndicator(.hidden)
@@ -1898,11 +1940,9 @@ struct EntryDetailView: View {
                         viewModel.replaceDayItem(updated)
                     },
                     onDelete: {
-                        Task {
-                            await viewModel.deleteItem(
-                                dayId: context.dayId,
-                                itemId: context.item.id)
-                        }
+                        await viewModel.deleteItem(
+                            dayId: context.dayId,
+                            itemId: context.item.id)
                     }
                 )
                 .presentationDetents([.medium, .large])
@@ -2096,13 +2136,15 @@ struct EntryDetailView: View {
 
     struct AddDayItemSheet: View {
         let day: TripDay
-        let onAdd: (String, String, String?, String?) -> Void
+        let onAdd: (String, String, String?, String?) async -> String?
         @Environment(\.dismiss) var dismiss
 
         @State private var selectedType = "place"
         @State private var title = ""
         @State private var notes = ""
         @State private var time = ""
+        @State private var isSaving = false
+        @State private var saveError: String? = nil
 
         let types = [
             ("place", "mappin", "Place"),
@@ -2201,21 +2243,30 @@ struct EntryDetailView: View {
                     }
                     .padding(16)
 
+                    if let saveError {
+                        HStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.circle")
+                                .foregroundColor(.bpError)
+                            Text(saveError)
+                                .font(.bpCallout)
+                                .foregroundColor(.bpError)
+                            Spacer()
+                        }
+                        .padding(14)
+                        .background(Color.bpError.opacity(0.06))
+                    }
+
                     Spacer()
 
                     BPButton(
                         "Add to Day \(day.dayNumber)",
-                        style: .primary
+                        style: .primary,
+                        isLoading: isSaving
                     ) {
-                        onAdd(
-                            selectedType,
-                            title,
-                            notes.isEmpty ? nil : notes,
-                            time.isEmpty ? nil : time)
-                        dismiss()
+                        Task { await save() }
                     }
                     .disabled(title.trimmingCharacters(
-                        in: .whitespaces).isEmpty)
+                        in: .whitespaces).isEmpty || isSaving)
                     .padding(16)
                 }
                 .background(Color.bpBackground)
@@ -2230,6 +2281,7 @@ struct EntryDetailView: View {
                         Button("Cancel") { dismiss() }
                             .buttonStyle(.plain)
                             .foregroundColor(.bpTextSecondary)
+                            .disabled(isSaving)
                     }
                     ToolbarItem(placement: .principal) {
                         Text("Add to Day \(day.dayNumber)")
@@ -2237,6 +2289,25 @@ struct EntryDetailView: View {
                             .foregroundColor(.bpInk)
                     }
                 }
+            }
+            .interactiveDismissDisabled(isSaving)
+        }
+
+        private func save() async {
+            guard !isSaving else { return }
+            isSaving = true
+            saveError = nil
+            defer { isSaving = false }
+            let error = await onAdd(
+                selectedType,
+                title,
+                notes.isEmpty ? nil : notes,
+                time.isEmpty ? nil : time
+            )
+            if let error {
+                saveError = error
+            } else {
+                dismiss()
             }
         }
 
@@ -2250,6 +2321,22 @@ struct EntryDetailView: View {
         }
     }
 
+    enum ItemEditorMutationState: Equatable {
+        case idle
+        case saving
+        case deleting
+
+        mutating func begin(_ operation: Self) -> Bool {
+            guard self == .idle, operation != .idle else { return false }
+            self = operation
+            return true
+        }
+
+        mutating func finish() {
+            self = .idle
+        }
+    }
+
     // MARK: - DayItemEditorSheet
 
     struct DayItemEditorSheet: View {
@@ -2257,14 +2344,14 @@ struct EntryDetailView: View {
         let dayId: String
         let item: TripDayItem
         let onSave: (TripDayItem) -> Void
-        let onDelete: () -> Void
+        let onDelete: () async -> String?
         @Environment(\.dismiss) private var dismiss
 
         @State private var title: String
         @State private var selectedType: String
         @State private var notes: String
         @State private var time: String
-        @State private var isSaving = false
+        @State private var mutationState = ItemEditorMutationState.idle
         @State private var saveError: String? = nil
         @State private var showDeleteConfirm = false
 
@@ -2280,7 +2367,7 @@ struct EntryDetailView: View {
             dayId: String,
             item: TripDayItem,
             onSave: @escaping (TripDayItem) -> Void,
-            onDelete: @escaping () -> Void
+            onDelete: @escaping () async -> String?
         ) {
             self.tripId = tripId
             self.dayId = dayId
@@ -2305,7 +2392,7 @@ struct EntryDetailView: View {
         }
 
         private var canSave: Bool {
-            !trimmedTitle.isEmpty && hasChanges && !isSaving
+            !trimmedTitle.isEmpty && hasChanges && mutationState == .idle
         }
 
         var body: some View {
@@ -2416,8 +2503,14 @@ struct EntryDetailView: View {
                         showDeleteConfirm = true
                     } label: {
                         HStack(spacing: 8) {
-                            Image(systemName: "trash")
-                                .font(.system(size: 15))
+                            if mutationState == .deleting {
+                                ProgressView()
+                                    .tint(.bpError)
+                                    .scaleEffect(0.8)
+                            } else {
+                                Image(systemName: "trash")
+                                    .font(.system(size: 15))
+                            }
                             Text("Delete item")
                                 .font(.bpBodyBold)
                             Spacer()
@@ -2428,6 +2521,7 @@ struct EntryDetailView: View {
                         .background(Color.bpError.opacity(0.06))
                     }
                     .buttonStyle(.plain)
+                    .disabled(mutationState != .idle)
                 }
                 .background(Color.bpBackground)
                 .navigationBarTitleDisplayMode(.inline)
@@ -2438,6 +2532,7 @@ struct EntryDetailView: View {
                         Button("Cancel") { dismiss() }
                             .buttonStyle(.plain)
                             .foregroundColor(.bpTextSecondary)
+                            .disabled(mutationState != .idle)
                     }
                     ToolbarItem(placement: .principal) {
                         Text("Edit item")
@@ -2448,7 +2543,7 @@ struct EntryDetailView: View {
                         Button {
                             Task { await save() }
                         } label: {
-                            if isSaving {
+                            if mutationState == .saving {
                                 ProgressView().tint(.bpCobalt)
                             } else {
                                 Text("Save")
@@ -2466,24 +2561,25 @@ struct EntryDetailView: View {
                     isPresented: $showDeleteConfirm
                 ) {
                     Button("Delete", role: .destructive) {
-                        onDelete()
-                        dismiss()
+                        Task { await delete() }
                     }
                     Button("Cancel", role: .cancel) {}
                 } message: {
                     Text("This cannot be undone.")
                 }
             }
+            .interactiveDismissDisabled(mutationState != .idle)
         }
 
         private func save() async {
-            isSaving = true
+            guard mutationState.begin(.saving) else { return }
             saveError = nil
+            defer { mutationState.finish() }
             do {
                 let updated = try await APIClient.shared.updateDayItem(
                     tripId: tripId,
                     dayId: dayId,
-                    itemId: item.id,
+                    item: item,
                     title: trimmedTitle,
                     type: selectedType,
                     notes: notes.isEmpty ? nil : notes,
@@ -2494,7 +2590,17 @@ struct EntryDetailView: View {
             } catch {
                 saveError = error.localizedDescription
             }
-            isSaving = false
+        }
+
+        private func delete() async {
+            guard mutationState.begin(.deleting) else { return }
+            saveError = nil
+            defer { mutationState.finish() }
+            if let error = await onDelete() {
+                saveError = error
+            } else {
+                dismiss()
+            }
         }
 
         private var titlePlaceholder: String {
