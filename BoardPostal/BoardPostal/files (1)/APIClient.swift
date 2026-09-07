@@ -139,6 +139,7 @@ final class APIClient {
             let body = RefreshRequest(refreshToken: refreshToken)
             var request = URLRequest(url: APIEndpoint.refresh.url)
             request.httpMethod = HTTPMethod.post.rawValue
+            request.timeoutInterval = 30
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONEncoder.bpEncoder.encode(body)
 
@@ -201,7 +202,9 @@ final class APIClient {
                     return messages.joined(separator: "\n")
                 }
             }
-            return json["message"] as? String ?? json["title"] as? String
+            return json["error"] as? String
+                ?? json["message"] as? String
+                ?? json["title"] as? String
         } catch {
             return nil
         }
@@ -210,6 +213,14 @@ final class APIClient {
 
 // MARK: - Trip Entry helpers
 extension APIClient {
+    func submitTrip(tripId: String, message: String?) async throws -> SubmitTripResponse {
+        try await request(
+            .submitTrip(tripId: tripId),
+            method: .post,
+            body: SubmitTripRequest(message: message)
+        )
+    }
+
     func createDay(tripId: String, body: CreateDayRequest) async throws -> TripDay {
         try await request(.days(tripId: tripId), method: .post, body: body)
     }

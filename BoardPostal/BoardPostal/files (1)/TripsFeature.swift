@@ -450,6 +450,13 @@ struct TripCard: View {
 // MARK: - TripDetailViewModel
 
 @MainActor
+protocol SubmissionAPIProviding {
+    func submitTrip(tripId: String, message: String?) async throws -> SubmitTripResponse
+}
+
+extension APIClient: SubmissionAPIProviding {}
+
+@MainActor
 final class TripDetailViewModel: ObservableObject {
     @Published var entries: [TripEntry] = []
     @Published var places: [TripPlace] = []
@@ -457,13 +464,23 @@ final class TripDetailViewModel: ObservableObject {
     @Published var mediaAssets: [TripMediaAsset] = []
     @Published var submission: TripSubmission? = nil
     @Published var isLoading = false
+    @Published var isSubmitting = false
     @Published var error: String?
 
     let trip: Trip
-    private let api = APIClient.shared
+    private let api: APIClient
+    private let submissionAPI: any SubmissionAPIProviding
 
     init(trip: Trip) {
         self.trip = trip
+        api = .shared
+        submissionAPI = APIClient.shared
+    }
+
+    init(trip: Trip, submissionAPI: any SubmissionAPIProviding) {
+        self.trip = trip
+        api = .shared
+        self.submissionAPI = submissionAPI
     }
 
     func loadAll() async {
@@ -542,14 +559,41 @@ final class TripDetailViewModel: ObservableObject {
         }
     }
 
-    func submitForPublication(message: String?) async throws {
-        let body = SubmitTripRequest(message: message)
-        let result: TripSubmission = try await APIClient.shared.request(
-            .submitTrip(tripId: trip.id),
-            method: .post,
-            body: body
-        )
-        submission = result
+    var submissionEligibilityError: String? {
+        if trip.visibility.lowercased() != "public" {
+            return "Trip must be public to submit."
+        }
+        if trip.isDraft {
+            return "Trip must be published to submit."
+        }
+        if trip.entryCount < 3 {
+            return "Trip must have at least 3 entries."
+        }
+        return nil
+    }
+
+    @discardableResult
+    func submitForPublication(message: String?) async -> String? {
+        guard !isSubmitting else { return "A submission is already in progress." }
+        isSubmitting = true
+        defer { isSubmitting = false }
+        do {
+            let result = try await submissionAPI.submitTrip(
+                tripId: trip.id,
+                message: message
+            )
+            submission = TripSubmission(
+                id: result.submissionId,
+                tripId: trip.id,
+                status: result.status,
+                message: message,
+                rejectionReason: nil,
+                createdAt: Date()
+            )
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
     }
 }
 
@@ -586,7 +630,6 @@ struct TripDetailView: View {
     @State private var showPDFShare = false
     private let pdfGenerator = PDFGenerator()
     @State private var submitMessage = ""
-    @State private var isSubmitting = false
     @State private var submitError: String? = nil
     @State private var toast: BPToast? = nil
     @State private var currentTrip: Trip
@@ -777,9 +820,6 @@ struct TripDetailView: View {
             VStack(spacing: 0) {
                 // Header
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Submit to Explore")
-                        .font(.bpHeadline)
-                        .foregroundColor(.bpInk)
                     Text("Your trip will be reviewed by the board_postal editorial team. Public trips only.")
                         .font(.bpCallout)
                         .foregroundColor(.bpTextSecondary)
@@ -824,21 +864,24 @@ struct TripDetailView: View {
                 BPButton(
                     "Submit for review",
                     style: .primary,
-                    isLoading: isSubmitting
+                    isLoading: viewModel.isSubmitting
                 ) {
                     Task {
-                        isSubmitting = true
+                        guard !viewModel.isSubmitting else { return }
                         submitError = nil
-                        do {
-                            try await viewModel.submitForPublication(
-                                message: submitMessage.isEmpty ? nil : submitMessage
-                            )
+                        if let eligibilityError = viewModel.submissionEligibilityError {
+                            submitError = eligibilityError
+                            return
+                        }
+                        let error = await viewModel.submitForPublication(
+                            message: submitMessage.isEmpty ? nil : submitMessage
+                        )
+                        if let error {
+                            submitError = error
+                        } else {
                             toast = BPToast(message: "Submitted for review")
                             showSubmitSheet = false
-                        } catch {
-                            submitError = error.localizedDescription
                         }
-                        isSubmitting = false
                     }
                 }
                 .padding(20)
@@ -856,6 +899,7 @@ struct TripDetailView: View {
                     }
                     .buttonStyle(.plain)
                     .foregroundColor(.bpTextSecondary)
+                    .disabled(viewModel.isSubmitting)
                 }
                 ToolbarItem(placement: .principal) {
                     Text("Submit to Explore")
@@ -866,6 +910,7 @@ struct TripDetailView: View {
             .presentationDragIndicator(.hidden)
         }
         .presentationDetents([.medium])
+        .interactiveDismissDisabled(viewModel.isSubmitting)
     }
 
     // MARK: - Share helpers
@@ -1188,7 +1233,8 @@ struct TripDetailView: View {
         case 2:
             ItineraryTabView(
                 tripId: viewModel.trip.id,
-                days: viewModel.days)
+                days: viewModel.days,
+                places: viewModel.places)
         case 3:
             MapTabView(places: viewModel.places)
                 .frame(minHeight: UIScreen.main.bounds.height - 480)
@@ -1803,12 +1849,14 @@ struct EntryDetailView: View {
 
     struct ItineraryTabView: View {
         let tripId: String
+        let places: [TripPlace]
         @StateObject var viewModel: ItineraryViewModel
         @State private var showAddItem = false
         @State private var selectedDay: TripDay? = nil
         @State private var expandedDayId: String? = nil
         @State private var toast: BPToast? = nil
         @State private var itemToEdit: ItemEditingContext? = nil
+        @State private var placeToView: PlaceDetailContext? = nil
 
         /// Carries the dayId alongside the item so .sheet(item:) doesn't have
         /// to derive it from a model field that's no longer on the wire.
@@ -1818,8 +1866,16 @@ struct EntryDetailView: View {
             var id: String { item.id }
         }
 
-        init(tripId: String, days: [TripDay]) {
+        private struct PlaceDetailContext: Identifiable {
+            let dayId: String
+            let item: TripDayItem
+            let place: TripPlace
+            var id: String { item.id }
+        }
+
+        init(tripId: String, days: [TripDay], places: [TripPlace] = []) {
             self.tripId = tripId
+            self.places = places
             _viewModel = StateObject(wrappedValue:
                 ItineraryViewModel(tripId: tripId,
                                    days: days))
@@ -1865,10 +1921,22 @@ struct EntryDetailView: View {
                                         showAddItem = true
                                     },
                                     onEditItem: { item in
-                                        itemToEdit = ItemEditingContext(
-                                            dayId: day.id,
-                                            item: item
-                                        )
+                                        if item.itemType == .place,
+                                           let placeId = item.placeId,
+                                           let place = places.first(where: {
+                                               $0.placeId == placeId
+                                           }) {
+                                            placeToView = PlaceDetailContext(
+                                                dayId: day.id,
+                                                item: item,
+                                                place: place
+                                            )
+                                        } else {
+                                            itemToEdit = ItemEditingContext(
+                                                dayId: day.id,
+                                                item: item
+                                            )
+                                        }
                                     },
                                     onDeleteItem: {
                                         itemId in
@@ -1948,6 +2016,21 @@ struct EntryDetailView: View {
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.hidden)
             }
+            .sheet(item: $placeToView) { context in
+                ItineraryPlaceDetailSheet(
+                    place: context.place,
+                    onEdit: {
+                        placeToView = nil
+                        Task { @MainActor in
+                            await Task.yield()
+                            itemToEdit = ItemEditingContext(
+                                dayId: context.dayId,
+                                item: context.item
+                            )
+                        }
+                    }
+                )
+            }
             .onChange(of: viewModel.error) { _, error in
                 if let error {
                     toast = BPToast(message: error)
@@ -1955,6 +2038,115 @@ struct EntryDetailView: View {
                 }
             }
             .bpToast($toast)
+        }
+    }
+
+    struct PlaceNavigationURLs {
+        static func appleMaps(for place: TripPlace) -> URL? {
+            guard let latitude = place.latitude,
+                  let longitude = place.longitude else { return nil }
+            var components = URLComponents(string: "https://maps.apple.com/")
+            components?.queryItems = [
+                URLQueryItem(name: "daddr", value: "\(latitude),\(longitude)"),
+                URLQueryItem(name: "q", value: place.placeName)
+            ]
+            return components?.url
+        }
+
+        static func googleMaps(for place: TripPlace) -> URL? {
+            guard let latitude = place.latitude,
+                  let longitude = place.longitude else { return nil }
+            var components = URLComponents(string: "https://www.google.com/maps/dir/")
+            components?.queryItems = [
+                URLQueryItem(name: "api", value: "1"),
+                URLQueryItem(name: "destination", value: "\(latitude),\(longitude)")
+            ]
+            return components?.url
+        }
+    }
+
+    struct ItineraryPlaceDetailSheet: View {
+        let place: TripPlace
+        let onEdit: () -> Void
+        @Environment(\.dismiss) private var dismiss
+        @Environment(\.openURL) private var openURL
+        @State private var showDirections = false
+        @State private var position: MapCameraPosition
+
+        init(place: TripPlace, onEdit: @escaping () -> Void) {
+            self.place = place
+            self.onEdit = onEdit
+            if let latitude = place.latitude, let longitude = place.longitude {
+                _position = State(initialValue: .region(MKCoordinateRegion(
+                    center: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
+                    span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
+                )))
+            } else {
+                _position = State(initialValue: .automatic)
+            }
+        }
+
+        var body: some View {
+            NavigationStack {
+                VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(place.placeName)
+                            .font(.bpHeadline)
+                            .foregroundColor(.bpInk)
+                        if let category = place.category, !category.isEmpty {
+                            Text(category)
+                                .font(.bpCallout)
+                                .foregroundColor(.bpTextSecondary)
+                        }
+                    }
+
+                    if let latitude = place.latitude, let longitude = place.longitude {
+                        Map(position: $position) {
+                            Marker(
+                                place.placeName,
+                                coordinate: CLLocationCoordinate2D(
+                                    latitude: latitude,
+                                    longitude: longitude
+                                )
+                            )
+                        }
+                        .frame(minHeight: 260)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+
+                        BPButton("Directions", style: .primary) {
+                            showDirections = true
+                        }
+                    } else {
+                        BPEmptyState(
+                            icon: "map",
+                            title: "Location unavailable",
+                            message: "This place does not have stored coordinates."
+                        )
+                    }
+                    Spacer()
+                }
+                .padding(20)
+                .background(Color.bpBackground)
+                .navigationTitle("Place")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .navigationBarLeading) {
+                        Button("Done") { dismiss() }
+                    }
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        Button("Edit", action: onEdit)
+                    }
+                }
+                .confirmationDialog("Open directions in", isPresented: $showDirections) {
+                    if let url = PlaceNavigationURLs.appleMaps(for: place) {
+                        Button("Apple Maps") { openURL(url) }
+                    }
+                    if let url = PlaceNavigationURLs.googleMaps(for: place) {
+                        Button("Google Maps") { openURL(url) }
+                    }
+                    Button("Cancel", role: .cancel) {}
+                }
+            }
         }
     }
 

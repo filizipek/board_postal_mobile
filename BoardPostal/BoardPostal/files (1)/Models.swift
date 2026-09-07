@@ -135,6 +135,11 @@ struct SubmitTripRequest: Encodable {
     let message: String?
 }
 
+struct SubmitTripResponse: Decodable {
+    let submissionId: String
+    let status: String
+}
+
 struct TripSubmission: Decodable {
     let id: String
     let tripId: String

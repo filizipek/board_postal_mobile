@@ -110,6 +110,24 @@ final class ItineraryViewModelTests: XCTestCase {
         XCTAssertFalse(viewModel.isSavingItem)
     }
 
+    func testTimedOutCreationEndsSavingAndDoesNotInsertItem() async throws {
+        let day: TripDay = try decodeFixture("itinerary-day")
+        let api = ItineraryAPIStub(createItemResult: .failure(URLError(.timedOut)))
+        let viewModel = ItineraryViewModel(tripId: "trip-1", days: [day], api: api)
+
+        let error = await viewModel.addItem(
+            to: day,
+            type: "place",
+            title: "Slow place",
+            notes: nil,
+            time: nil
+        )
+
+        XCTAssertNotNil(error)
+        XCTAssertEqual(viewModel.days[0].items.count, day.items.count)
+        XCTAssertFalse(viewModel.isSavingItem)
+    }
+
     func testSuccessfulNoContentDayUpdateUpdatesLocalStateAndEndsSaving() async throws {
         let day: TripDay = try decodeFixture("itinerary-day")
         let viewModel = ItineraryViewModel(tripId: "trip-1", days: [day], api: ItineraryAPIStub())
