@@ -217,6 +217,7 @@ struct BPEmptyState: View {
     let title: String
     let message: String
     var actionTitle: String? = nil
+    var isLoading = false
     var action: (() -> Void)? = nil
 
     var body: some View {
@@ -241,7 +242,12 @@ struct BPEmptyState: View {
             }
 
             if let actionTitle, let action {
-                BPButton(actionTitle, style: .primary, action: action)
+                BPButton(
+                    actionTitle,
+                    style: .primary,
+                    isLoading: isLoading,
+                    action: action
+                )
                     .frame(width: 200)
             }
         }

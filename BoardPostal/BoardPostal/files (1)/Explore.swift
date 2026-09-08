@@ -4,16 +4,41 @@ import Combine
 // MARK: - ExploreViewModel
 
 @MainActor
+protocol ExploreProviding {
+    func fetchFeaturedTrips() async throws -> [FeaturedTrip]
+    func fetchPublicTrips() async throws -> PaginatedResponse<PublicTripCard>
+}
+
+extension APIClient: ExploreProviding {
+    func fetchFeaturedTrips() async throws -> [FeaturedTrip] {
+        try await request(.exploreFeatured)
+    }
+
+    func fetchPublicTrips() async throws -> PaginatedResponse<PublicTripCard> {
+        try await request(.exploreTrips)
+    }
+}
+
+@MainActor
 final class ExploreViewModel: ObservableObject {
     @Published var featuredTrips: [FeaturedTrip] = []
-    @Published var recentTrips: [Trip] = []
-    @Published var searchResults: [Trip] = []
+    @Published var recentTrips: [PublicTripCard] = []
+    @Published var searchResults: [PublicTripCard] = []
     @Published var searchQuery: String = ""
     @Published var isLoading = false
     @Published var isSearching = false
     @Published var error: String?
+    @Published var searchError: String?
 
-    private let api = APIClient.shared
+    private let api: any ExploreProviding
+
+    init(api: any ExploreProviding) {
+        self.api = api
+    }
+
+    convenience init() {
+        self.init(api: APIClient.shared)
+    }
 
     var isShowingSearch: Bool {
         !searchQuery.trimmingCharacters(in: .whitespaces).isEmpty
@@ -22,39 +47,37 @@ final class ExploreViewModel: ObservableObject {
     func loadFeed() async {
         isLoading = true
         error = nil
+        defer { isLoading = false }
         do {
-            async let f: [FeaturedTrip] = api.request(.exploreFeatured)
-            async let r: [Trip] = {
-                if let paged: PaginatedResponse<Trip> = try? await
-                    api.request(.exploreTrips) {
-                    return paged.items
-                }
-                return (try? await api.request(.exploreTrips)) ?? []
-            }()
-            (featuredTrips, recentTrips) = try await (f, r)
+            let featuredResponse = try await api.fetchFeaturedTrips()
+            let recentResponse = try await api.fetchPublicTrips()
+            featuredTrips = featuredResponse
+            recentTrips = recentResponse.items
         } catch {
             self.error = error.localizedDescription
         }
-        isLoading = false
     }
 
     func search() async {
         let query = searchQuery.trimmingCharacters(in: .whitespaces)
         guard !query.isEmpty else {
             searchResults = []
+            searchError = nil
             return
         }
         isSearching = true
+        searchError = nil
+        defer { isSearching = false }
         do {
-            let results: [Trip] = try await api.request(.exploreTrips)
-            searchResults = results.filter {
+            let response = try await api.fetchPublicTrips()
+            searchResults = response.items.filter {
                 $0.title.localizedCaseInsensitiveContains(query)
                 || $0.destinationSummary.localizedCaseInsensitiveContains(query)
             }
         } catch {
             searchResults = []
+            searchError = error.localizedDescription
         }
-        isSearching = false
     }
 }
 
@@ -228,6 +251,12 @@ struct ExploreView: View {
             if viewModel.isSearching {
                 BPLoadingView()
                     .frame(height: 200)
+            } else if viewModel.searchError != nil {
+                BPEmptyState(
+                    icon: "exclamationmark.triangle",
+                    title: "Unable to search",
+                    message: "Please try again."
+                )
             } else if viewModel.searchResults.isEmpty {
                 BPEmptyState(
                     icon: "magnifyingglass",
@@ -593,12 +622,29 @@ struct ExplorePublicTripView: View {
 // MARK: - ExploreGridCell
 
 struct ExploreGridCell: View {
-    let trip: Trip
+    private let title: String
+    private let coverURL: URL?
+    private let createdAt: Date
+    private let destinationSummary: String
+
+    init(trip: PublicTripCard) {
+        title = trip.title
+        coverURL = trip.coverURL
+        createdAt = trip.createdAt
+        destinationSummary = trip.destinationSummary
+    }
+
+    init(trip: Trip) {
+        title = trip.title
+        coverURL = trip.coverURL
+        createdAt = trip.createdAt
+        destinationSummary = trip.destinationSummary
+    }
 
     private var formattedDate: String {
         let formatter = DateFormatter()
         formatter.dateFormat = "MMM yyyy"
-        return formatter.string(from: trip.createdAt)
+        return formatter.string(from: createdAt)
     }
 
     var body: some View {
@@ -606,7 +652,7 @@ struct ExploreGridCell: View {
             VStack(spacing: 0) {
                 // Cover
                 ZStack(alignment: .bottomLeading) {
-                    if let url = trip.coverURL {
+                    if let url = coverURL {
                         AsyncImage(url: url) { phase in
                             switch phase {
                             case .success(let image):
@@ -631,12 +677,12 @@ struct ExploreGridCell: View {
 
                 // Info
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(trip.title)
+                    Text(title)
                         .font(.bpCallout)
                         .foregroundColor(.bpInk)
                         .lineLimit(1)
 
-                    Text(trip.destinationSummary)
+                    Text(destinationSummary)
                         .font(.bpCaption)
                         .foregroundColor(.bpTextMuted)
                         .lineLimit(1)
@@ -651,18 +697,35 @@ struct ExploreGridCell: View {
 // MARK: - SearchResultRow
 
 struct SearchResultRow: View {
-    let trip: Trip
+    private let title: String
+    private let coverURL: URL?
+    private let createdAt: Date
+    private let destinationSummary: String
+
+    init(trip: PublicTripCard) {
+        title = trip.title
+        coverURL = trip.coverURL
+        createdAt = trip.createdAt
+        destinationSummary = trip.destinationSummary
+    }
+
+    init(trip: Trip) {
+        title = trip.title
+        coverURL = trip.coverURL
+        createdAt = trip.createdAt
+        destinationSummary = trip.destinationSummary
+    }
 
     private var formattedDate: String {
         let formatter = DateFormatter()
         formatter.dateFormat = "MMM yyyy"
-        return formatter.string(from: trip.createdAt)
+        return formatter.string(from: createdAt)
     }
 
     var body: some View {
         HStack(spacing: 12) {
             // Thumbnail
-            if let url = trip.coverURL {
+            if let url = coverURL {
                 AsyncImage(url: url) { phase in
                     switch phase {
                     case .success(let image):
@@ -682,12 +745,12 @@ struct SearchResultRow: View {
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(trip.title)
+                Text(title)
                     .font(.bpBodyBold)
                     .foregroundColor(.bpInk)
                     .lineLimit(1)
 
-                Text(trip.destinationSummary)
+                Text(destinationSummary)
                     .font(.bpCaption)
                     .foregroundColor(.bpTextMuted)
                     .lineLimit(1)

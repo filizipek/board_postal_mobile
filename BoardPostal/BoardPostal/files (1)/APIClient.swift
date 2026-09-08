@@ -8,7 +8,11 @@ import Foundation
 
 final class APIClient {
     static let shared = APIClient()
-    private init() {}
+    private let session: URLSession
+
+    init(session: URLSession = .shared) {
+        self.session = session
+    }
 
     private let keychain = KeychainService.shared
     private var isRefreshing = false
@@ -59,7 +63,7 @@ final class APIClient {
             request.httpBody = try JSONEncoder.bpEncoder.encode(body)
         }
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw APIError.invalidResponse
@@ -135,10 +139,11 @@ final class APIClient {
             let body = RefreshRequest(refreshToken: refreshToken)
             var request = URLRequest(url: APIEndpoint.refresh.url)
             request.httpMethod = HTTPMethod.post.rawValue
+            request.timeoutInterval = 30
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONEncoder.bpEncoder.encode(body)
 
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await session.data(for: request)
 
             guard let httpResponse = response as? HTTPURLResponse,
                   httpResponse.statusCode == 200 else {
@@ -187,13 +192,55 @@ final class APIClient {
 
     // MARK: - Error message parser
     private func parseErrorMessage(from data: Data) -> String? {
-        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        return json?["message"] as? String ?? json?["title"] as? String
+        do {
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return nil
+            }
+            if let errors = json["errors"] as? [String: [String]] {
+                let messages = errors.keys.sorted().flatMap { errors[$0] ?? [] }
+                if !messages.isEmpty {
+                    return messages.joined(separator: "\n")
+                }
+            }
+            return json["error"] as? String
+                ?? json["message"] as? String
+                ?? json["title"] as? String
+        } catch {
+            return nil
+        }
     }
 }
 
 // MARK: - Trip Entry helpers
 extension APIClient {
+    func updateTrip(id: String, body: UpdateTripRequest) async throws -> Trip {
+        try await request(.trip(id: id), method: .put, body: body)
+    }
+
+    func submitTrip(tripId: String, message: String?) async throws -> SubmitTripResponse {
+        try await request(
+            .submitTrip(tripId: tripId),
+            method: .post,
+            body: SubmitTripRequest(message: message)
+        )
+    }
+
+    func createDay(tripId: String, body: CreateDayRequest) async throws -> TripDay {
+        try await request(.days(tripId: tripId), method: .post, body: body)
+    }
+
+    func updateDay(tripId: String, dayId: String, body: UpdateDayRequest) async throws {
+        try await requestVoid(.day(tripId: tripId, dayId: dayId), method: .put, body: body)
+    }
+
+    func createDayItem(
+        tripId: String,
+        dayId: String,
+        body: CreateDayItemRequest
+    ) async throws -> TripDayItem {
+        try await request(.dayItems(tripId: tripId, dayId: dayId), method: .post, body: body)
+    }
+
     func updateEntry(
         tripId: String,
         entryId: String,
@@ -221,7 +268,7 @@ extension APIClient {
     func updateDayItem(
         tripId: String,
         dayId: String,
-        itemId: String,
+        item: TripDayItem,
         title: String,
         type: String,
         notes: String?,
@@ -233,10 +280,20 @@ extension APIClient {
             let notes: String?
             let time: String?
         }
-        return try await request(
-            .dayItem(tripId: tripId, dayId: dayId, itemId: itemId),
+        try await requestVoid(
+            .dayItem(tripId: tripId, dayId: dayId, itemId: item.id),
             method: .put,
             body: Body(title: title, type: type, notes: notes, time: time)
+        )
+        return TripDayItem(
+            id: item.id,
+            tripDayId: item.tripDayId,
+            type: item.type,
+            title: title,
+            notes: notes,
+            time: time,
+            orderIndex: item.orderIndex,
+            placeId: item.placeId
         )
     }
 }

@@ -69,16 +69,175 @@ final class TripViewModel: ObservableObject {
     }
 }
 
+enum TripCountText {
+    static func make(_ count: Int) -> String {
+        "\(count) \(count == 1 ? "trip" : "trips")"
+    }
+}
+
+#if DEBUG
+enum TripsVisualVerificationScenario: String {
+    case zero
+    case one
+    case two
+    case several
+    case privateDraft
+    case publishedPrivate
+    case publishedPublic
+    case blockedPending
+    case blockedListed
+    case accessibility
+
+    static var current: Self? {
+        let prefix = "--trips-visual-scenario="
+        guard let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix(prefix) }) else {
+            return nil
+        }
+        return Self(rawValue: String(argument.dropFirst(prefix.count)))
+    }
+
+    var trips: [Trip] {
+        switch self {
+        case .zero: []
+        case .one: Array(TripsVisualVerificationData.drafts.prefix(1))
+        case .two: Array(TripsVisualVerificationData.drafts.prefix(2))
+        case .several: TripsVisualVerificationData.drafts
+        case .privateDraft, .publishedPrivate, .publishedPublic,
+             .blockedPending, .blockedListed, .accessibility: []
+        }
+    }
+
+    var settingsTrip: Trip? {
+        switch self {
+        case .privateDraft, .accessibility:
+            TripsVisualVerificationData.settingsTrip(isDraft: true, visibility: "private")
+        case .publishedPrivate:
+            TripsVisualVerificationData.settingsTrip(isDraft: false, visibility: "private")
+        case .publishedPublic, .blockedPending, .blockedListed:
+            TripsVisualVerificationData.settingsTrip(isDraft: false, visibility: "public")
+        default:
+            nil
+        }
+    }
+
+    var blockingError: String? {
+        switch self {
+        case .blockedPending:
+            "Cannot make this trip private while its Explore submission is pending. Explore withdrawal or removal must be resolved first."
+        case .blockedListed:
+            "Cannot move this trip back to drafts while its Explore submission is approved/listed. Explore withdrawal or removal must be resolved first."
+        default:
+            nil
+        }
+    }
+}
+
+enum TripsVisualVerificationData {
+    static let drafts: [Trip] = [
+        makeDraft(id: "draft-izmir", title: "A Slow Weekend Along the İzmir Waterfront", city: "İzmir", country: "Turkey", days: 1),
+        makeDraft(id: "draft-ordu", title: "Ordu Highlands and the Very Long Black Sea Coast Journey", city: "Ordu", country: "Turkey", days: 3),
+        makeDraft(id: "draft-copenhagen", title: "Copenhagen by Bicycle", city: "Copenhagen", country: "Denmark", days: 5),
+        makeDraft(id: "draft-san-francisco", title: "Neighborhood Notes from San Francisco", city: "San Francisco", country: "United States", days: 8)
+    ]
+
+    private static func makeDraft(id: String, title: String, city: String, country: String, days: Int) -> Trip {
+        Trip(
+            id: id,
+            title: title,
+            description: nil,
+            coverPhotoUrl: nil,
+            plannedStartDate: nil,
+            plannedEndDate: nil,
+            actualStartDate: nil,
+            actualEndDate: nil,
+            visibility: "Private",
+            country: country,
+            city: city,
+            isDraft: true,
+            isPlanning: false,
+            createdAt: Date(timeIntervalSince1970: 1_750_000_000),
+            ownerId: "visual-verification-owner",
+            entryCount: 0,
+            dayCount: days,
+            destinations: [TripDestination(id: "\(id)-destination", country: country, city: city, orderIndex: 0)]
+        )
+    }
+
+    static func settingsTrip(isDraft: Bool, visibility: String) -> Trip {
+        Trip(
+            id: "settings-trip",
+            title: "A Week Along the Aegean Coast",
+            description: "Deterministic lifecycle verification trip",
+            coverPhotoUrl: nil,
+            plannedStartDate: nil,
+            plannedEndDate: nil,
+            actualStartDate: nil,
+            actualEndDate: nil,
+            visibility: visibility,
+            country: "Türkiye",
+            city: "İzmir",
+            isDraft: isDraft,
+            isPlanning: false,
+            createdAt: Date(timeIntervalSince1970: 1_750_000_000),
+            ownerId: "visual-verification-owner",
+            entryCount: 3,
+            dayCount: 4,
+            destinations: []
+        )
+    }
+}
+
+struct TripsVisualVerificationView: View {
+    @StateObject private var viewModel: TripViewModel
+
+    init(scenario: TripsVisualVerificationScenario) {
+        self.scenario = scenario
+        let viewModel = TripViewModel()
+        viewModel.trips = scenario.trips
+        _viewModel = StateObject(wrappedValue: viewModel)
+    }
+
+    var body: some View {
+        if let trip = scenario.settingsTrip {
+            EditTripView(
+                verificationTrip: trip,
+                hasExploreSubmission: scenario.blockingError != nil,
+                error: scenario.blockingError
+            ) { _ in }
+            .environment(
+                \.dynamicTypeSize,
+                scenario == .accessibility ? .accessibility3 : .large
+            )
+        } else {
+            TripsListView(viewModel: viewModel, automaticallyLoadsTrips: false)
+        }
+    }
+
+    private let scenario: TripsVisualVerificationScenario
+}
+#endif
+
 // MARK: - TripsListView
 
 struct TripsListView: View {
-    @StateObject private var viewModel = TripViewModel()
+    @StateObject private var viewModel: TripViewModel
+    private let automaticallyLoadsTrips: Bool
     @State private var showCreateTrip = false
     @State private var showDeleteAlert = false
     @State private var tripToDelete: Trip?
     @State private var tripToEdit: Trip? = nil
     @State private var showEditTrip = false
     @State private var toast: BPToast? = nil
+
+    init() {
+        _viewModel = StateObject(wrappedValue: TripViewModel())
+        automaticallyLoadsTrips = true
+    }
+
+    init(viewModel: TripViewModel, automaticallyLoadsTrips: Bool) {
+        _viewModel = StateObject(wrappedValue: viewModel)
+        self.automaticallyLoadsTrips = automaticallyLoadsTrips
+    }
 
     var body: some View {
         Group {
@@ -110,7 +269,7 @@ struct TripsListView: View {
                         baseColor: .bpInk
                     )
                     if !viewModel.trips.isEmpty {
-                        Text("\(viewModel.trips.count) trips")
+                        Text(TripCountText.make(viewModel.trips.count))
                             .font(.bpCaption)
                             .foregroundColor(.bpTextMuted)
                     }
@@ -160,7 +319,9 @@ struct TripsListView: View {
             Task { await viewModel.loadTrips() }
         }
         .task {
-            await viewModel.loadTrips()
+            if automaticallyLoadsTrips {
+                await viewModel.loadTrips()
+            }
         }
         .refreshable {
             await viewModel.loadTrips()
@@ -207,29 +368,27 @@ struct TripsListView: View {
                     BPSectionHeader(title: "Drafts")
                         .padding(.horizontal, 16)
                         .padding(.top, 24)
-                        .padding(.bottom, 12)
+                        .padding(.bottom, 18)
 
-                    ForEach(Array(viewModel.draftTrips.enumerated()), id: \.element.id) { index, trip in
-                        TripCard(
-                            trip: trip,
-                            onEdit: {
-                                tripToEdit = trip
-                                showEditTrip = true
-                            },
-                            onDelete: {
-                                tripToDelete = trip
-                                showDeleteAlert = true
-                            },
-                            onToggleDraft: {
-                                Task {
-                                    await viewModel.toggleDraft(trip: trip)
-                                    toast = BPToast(message: trip.isDraft ? "Trip published" : "Moved to drafts")
+                    LazyVStack(spacing: 12) {
+                        ForEach(viewModel.draftTrips) { trip in
+                            TripCard(
+                                trip: trip,
+                                onEdit: {
+                                    tripToEdit = trip
+                                    showEditTrip = true
+                                },
+                                onDelete: {
+                                    tripToDelete = trip
+                                    showDeleteAlert = true
+                                },
+                                onToggleDraft: {
+                                    Task {
+                                        await viewModel.toggleDraft(trip: trip)
+                                        toast = BPToast(message: trip.isDraft ? "Trip published" : "Moved to drafts")
+                                    }
                                 }
-                            }
-                        )
-
-                        if index < viewModel.draftTrips.count - 1 {
-                            BPDivider()
+                            )
                         }
                     }
                 }
@@ -249,37 +408,37 @@ struct TripCard: View {
 
     var body: some View {
         NavigationLink(destination: TripDetailView(trip: trip)) {
-            Color.clear
-                .frame(maxWidth: .infinity)
-                .frame(height: 240)
-                .background(
-                    Group {
-                        if let url = trip.coverURL {
-                            AsyncImage(url: url) { phase in
-                                switch phase {
-                                case .success(let img):
-                                    img.resizable().scaledToFill()
-                                default:
-                                    LinearGradient.bpCoverGradient(for: trip.id)
+            ZStack(alignment: .bottomLeading) {
+                Rectangle()
+                    .fill(Color.clear)
+                    .overlay {
+                        Group {
+                            if let url = trip.coverURL {
+                                AsyncImage(url: url) { phase in
+                                    switch phase {
+                                    case .success(let img):
+                                        img.resizable().scaledToFill()
+                                    default:
+                                        LinearGradient.bpCoverGradient(for: trip.id)
+                                    }
                                 }
+                            } else {
+                                LinearGradient.bpCoverGradient(for: trip.id)
                             }
-                        } else {
-                            LinearGradient.bpCoverGradient(for: trip.id)
                         }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .clipped()
                     }
-                    .clipped()
-                )
-                .overlay(alignment: .bottom) {
+
                     LinearGradient(
                         colors: [
                             Color.black.opacity(0.85),
-                            Color.black.opacity(0.0)
+                            Color.black.opacity(0.08)
                         ],
                         startPoint: .bottom,
                         endPoint: .init(x: 0.5, y: 0.4)
                     )
-                }
-                .overlay(alignment: .bottomLeading) {
+
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 6) {
                             if trip.isDraft {
@@ -305,8 +464,11 @@ struct TripCard: View {
                     }
                     .padding(.horizontal, 16)
                     .padding(.bottom, 16)
+                    .padding(.top, 24)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .frame(maxWidth: .infinity, minHeight: 240, alignment: .bottomLeading)
+                .clipped()
         }
         .buttonStyle(.plain)
         .shadow(color: Color.bpInk.opacity(0.1), radius: 8, x: 0, y: 2)
@@ -349,12 +511,20 @@ struct TripCard: View {
         if !parts.isEmpty {
             Text(parts.joined(separator: " · "))
                 .font(BPFont.inter(size: 11, weight: .regular))
-                .foregroundColor(.white.opacity(0.55))
+                .foregroundColor(.white.opacity(0.82))
+                .shadow(color: .black.opacity(0.45), radius: 1, x: 0, y: 1)
         }
     }
 }
 
 // MARK: - TripDetailViewModel
+
+@MainActor
+protocol SubmissionAPIProviding {
+    func submitTrip(tripId: String, message: String?) async throws -> SubmitTripResponse
+}
+
+extension APIClient: SubmissionAPIProviding {}
 
 @MainActor
 final class TripDetailViewModel: ObservableObject {
@@ -364,13 +534,23 @@ final class TripDetailViewModel: ObservableObject {
     @Published var mediaAssets: [TripMediaAsset] = []
     @Published var submission: TripSubmission? = nil
     @Published var isLoading = false
+    @Published var isSubmitting = false
     @Published var error: String?
 
-    let trip: Trip
-    private let api = APIClient.shared
+    @Published var trip: Trip
+    private let api: APIClient
+    private let submissionAPI: any SubmissionAPIProviding
 
     init(trip: Trip) {
         self.trip = trip
+        api = .shared
+        submissionAPI = APIClient.shared
+    }
+
+    init(trip: Trip, submissionAPI: any SubmissionAPIProviding) {
+        self.trip = trip
+        api = .shared
+        self.submissionAPI = submissionAPI
     }
 
     func loadAll() async {
@@ -449,18 +629,54 @@ final class TripDetailViewModel: ObservableObject {
         }
     }
 
-    func submitForPublication(message: String?) async throws {
-        let body = SubmitTripRequest(message: message)
-        let result: TripSubmission = try await APIClient.shared.request(
-            .submitTrip(tripId: trip.id),
-            method: .post,
-            body: body
-        )
-        submission = result
+    var submissionEligibilityError: String? {
+        if trip.visibility.lowercased() != "public" {
+            return "Trip must be public to submit."
+        }
+        if trip.isDraft {
+            return "Trip must be published to submit."
+        }
+        if trip.entryCount < 3 {
+            return "Trip must have at least 3 entries."
+        }
+        return nil
+    }
+
+    @discardableResult
+    func submitForPublication(message: String?) async -> String? {
+        guard !isSubmitting else { return "A submission is already in progress." }
+        isSubmitting = true
+        defer { isSubmitting = false }
+        do {
+            let result = try await submissionAPI.submitTrip(
+                tripId: trip.id,
+                message: message
+            )
+            submission = TripSubmission(
+                id: result.submissionId,
+                tripId: trip.id,
+                status: result.status,
+                message: message,
+                rejectionReason: nil,
+                createdAt: Date()
+            )
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
     }
 }
 
 // MARK: - TripDetailView
+
+@MainActor
+protocol ItineraryAPIProviding {
+    func createDay(tripId: String, body: CreateDayRequest) async throws -> TripDay
+    func updateDay(tripId: String, dayId: String, body: UpdateDayRequest) async throws
+    func createDayItem(tripId: String, dayId: String, body: CreateDayItemRequest) async throws -> TripDayItem
+}
+
+extension APIClient: ItineraryAPIProviding {}
 
 struct TripDetailView: View {
     @StateObject private var viewModel: TripDetailViewModel
@@ -484,7 +700,6 @@ struct TripDetailView: View {
     @State private var showPDFShare = false
     private let pdfGenerator = PDFGenerator()
     @State private var submitMessage = ""
-    @State private var isSubmitting = false
     @State private var submitError: String? = nil
     @State private var toast: BPToast? = nil
     @State private var currentTrip: Trip
@@ -529,6 +744,8 @@ struct TripDetailView: View {
                 Button {
                     if currentTrip.visibility.lowercased() == "public" {
                         showShareSheet = true
+                    } else if currentTrip.isDraft {
+                        showEditTrip = true
                     } else {
                         showMakePublicAlert = true
                     }
@@ -581,9 +798,14 @@ struct TripDetailView: View {
             .presentationDragIndicator(.hidden)
         }
         .sheet(isPresented: $showEditTrip) {
-            EditTripView(trip: currentTrip) { updated in
+            EditTripView(
+                trip: currentTrip,
+                hasExploreSubmission: viewModel.submission.map {
+                    ["pending", "approved"].contains($0.status.lowercased())
+                } ?? false
+            ) { updated in
                 currentTrip = updated
-                showEditTrip = false
+                viewModel.trip = updated
                 toast = BPToast(message: "Trip updated")
                 Task { await viewModel.loadAll() }
                 NotificationCenter.default.post(
@@ -675,9 +897,6 @@ struct TripDetailView: View {
             VStack(spacing: 0) {
                 // Header
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Submit to Explore")
-                        .font(.bpHeadline)
-                        .foregroundColor(.bpInk)
                     Text("Your trip will be reviewed by the board_postal editorial team. Public trips only.")
                         .font(.bpCallout)
                         .foregroundColor(.bpTextSecondary)
@@ -686,6 +905,27 @@ struct TripDetailView: View {
                 .padding(20)
 
                 BPDivider()
+
+                VStack(alignment: .leading, spacing: 10) {
+                    submissionRequirement(
+                        "Trip must be published",
+                        met: !currentTrip.isDraft
+                    )
+                    submissionRequirement(
+                        "Trip must be public",
+                        met: currentTrip.visibility.lowercased() == "public"
+                    )
+                    submissionRequirement(
+                        "At least three entries",
+                        met: currentTrip.entryCount >= 3
+                    )
+                    submissionRequirement(
+                        "At least one place",
+                        met: !viewModel.places.isEmpty
+                    )
+                }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 16)
 
                 // Optional message
                 VStack(alignment: .leading, spacing: 8) {
@@ -722,23 +962,35 @@ struct TripDetailView: View {
                 BPButton(
                     "Submit for review",
                     style: .primary,
-                    isLoading: isSubmitting
+                    isLoading: viewModel.isSubmitting
                 ) {
                     Task {
-                        isSubmitting = true
+                        guard !viewModel.isSubmitting else { return }
                         submitError = nil
-                        do {
-                            try await viewModel.submitForPublication(
-                                message: submitMessage.isEmpty ? nil : submitMessage
-                            )
+                        if let eligibilityError = viewModel.submissionEligibilityError {
+                            submitError = eligibilityError
+                            return
+                        }
+                        if viewModel.places.isEmpty {
+                            submitError = "Trip must have at least 1 place."
+                            return
+                        }
+                        let error = await viewModel.submitForPublication(
+                            message: submitMessage.isEmpty ? nil : submitMessage
+                        )
+                        if let error {
+                            submitError = error
+                        } else {
                             toast = BPToast(message: "Submitted for review")
                             showSubmitSheet = false
-                        } catch {
-                            submitError = error.localizedDescription
                         }
-                        isSubmitting = false
                     }
                 }
+                .disabled(
+                    viewModel.submissionEligibilityError != nil
+                    || viewModel.places.isEmpty
+                    || viewModel.isSubmitting
+                )
                 .padding(20)
 
                 Spacer()
@@ -754,6 +1006,7 @@ struct TripDetailView: View {
                     }
                     .buttonStyle(.plain)
                     .foregroundColor(.bpTextSecondary)
+                    .disabled(viewModel.isSubmitting)
                 }
                 ToolbarItem(placement: .principal) {
                     Text("Submit to Explore")
@@ -764,6 +1017,14 @@ struct TripDetailView: View {
             .presentationDragIndicator(.hidden)
         }
         .presentationDetents([.medium])
+        .interactiveDismissDisabled(viewModel.isSubmitting)
+    }
+
+    private func submissionRequirement(_ title: String, met: Bool) -> some View {
+        Label(title, systemImage: met ? "checkmark.circle.fill" : "circle")
+            .font(.bpCallout)
+            .foregroundColor(met ? .bpCobalt : .bpTextSecondary)
+            .accessibilityLabel("\(title): \(met ? "met" : "not met")")
     }
 
     // MARK: - Share helpers
@@ -807,25 +1068,21 @@ struct TripDetailView: View {
         do {
             let body = UpdateTripRequest(
                 title: nil,
-                visibility: "Public",
+                visibility: "public",
                 isDraft: nil,
                 isPlanning: nil,
                 coverPhotoUrl: nil
             )
-            let updated: Trip = try await APIClient.shared.request(
-                .trip(id: currentTrip.id),
-                method: .put,
-                body: body
-            )
+            let updated = try await APIClient.shared.updateTrip(id: currentTrip.id, body: body)
             currentTrip = updated
+            viewModel.trip = updated
             NotificationCenter.default.post(
                 name: .bpTripUpdated,
                 object: currentTrip.id
             )
             showShareSheet = true
         } catch {
-            // Best-effort — still surface the share sheet
-            showShareSheet = true
+            toast = BPToast(message: error.localizedDescription)
         }
     }
 
@@ -847,7 +1104,7 @@ struct TripDetailView: View {
                 Button {
                     showEditTrip = true
                 } label: {
-                    Label("Edit trip", systemImage: "slider.horizontal.3")
+                    Label("Trip settings", systemImage: "slider.horizontal.3")
                 }
 
                 Button {
@@ -869,8 +1126,7 @@ struct TripDetailView: View {
                 }
                 .disabled(isExportingPDF)
 
-                if currentTrip.visibility.lowercased() == "public"
-                    && !currentTrip.isDraft {
+                if KeychainService.shared.userId == currentTrip.ownerId {
                     Divider()
                     if let sub = viewModel.submission {
                         switch sub.status.lowercased() {
@@ -1086,7 +1342,8 @@ struct TripDetailView: View {
         case 2:
             ItineraryTabView(
                 tripId: viewModel.trip.id,
-                days: viewModel.days)
+                days: viewModel.days,
+                places: viewModel.places)
         case 3:
             MapTabView(places: viewModel.places)
                 .frame(minHeight: UIScreen.main.bounds.height - 480)
@@ -1502,13 +1759,24 @@ struct EntryDetailView: View {
     @MainActor
     final class ItineraryViewModel: ObservableObject {
         let tripId: String
+        private let api: any ItineraryAPIProviding
         @Published var days: [TripDay]
         @Published var isLoading = false
         @Published var error: String? = nil
         @Published var isAddingDay = false
+        @Published var isSavingItem = false
+        @Published var isUpdatingDay = false
 
         init(tripId: String, days: [TripDay]) {
             self.tripId = tripId
+            api = APIClient.shared
+            self.days = days.sorted {
+                $0.dayNumber < $1.dayNumber }
+        }
+
+        init(tripId: String, days: [TripDay], api: any ItineraryAPIProviding) {
+            self.tripId = tripId
+            self.api = api
             self.days = days.sorted {
                 $0.dayNumber < $1.dayNumber }
         }
@@ -1517,8 +1785,11 @@ struct EntryDetailView: View {
             days.sorted { $0.dayNumber < $1.dayNumber }
         }
 
-        func addDay() async {
+        @discardableResult
+        func addDay() async -> Bool {
+            guard !isAddingDay else { return false }
             isAddingDay = true
+            defer { isAddingDay = false }
             let nextNumber = (days.map {
                 $0.dayNumber }.max() ?? 0) + 1
             do {
@@ -1527,35 +1798,38 @@ struct EntryDetailView: View {
                     title: "Day \(nextNumber)",
                     date: nil,
                     orderIndex: nextNumber - 1)
-                let newDay: TripDay = try await
-                    APIClient.shared.request(
-                        .days(tripId: tripId),
-                        method: .post,
-                        body: body)
+                let newDay = try await api.createDay(tripId: tripId, body: body)
                 days.append(newDay)
+                return true
             } catch {
                 self.error = error.localizedDescription
+                return false
             }
-            isAddingDay = false
         }
 
         func updateDay(_ day: TripDay,
                        title: String,
                        date: String?) async {
+            isUpdatingDay = true
+            defer { isUpdatingDay = false }
             do {
                 let body = UpdateDayRequest(
                     title: title.isEmpty ? nil : title,
                     date: date,
                     orderIndex: nil)
-                let updated: TripDay = try await
-                    APIClient.shared.request(
-                        .day(tripId: tripId,
-                             dayId: day.id),
-                        method: .put,
-                        body: body)
+                try await api.updateDay(tripId: tripId, dayId: day.id, body: body)
                 if let i = days.firstIndex(
                     where: { $0.id == day.id }) {
-                    days[i] = updated
+                    let currentDay = days[i]
+                    days[i] = TripDay(
+                        id: currentDay.id,
+                        tripId: currentDay.tripId,
+                        dayNumber: currentDay.dayNumber,
+                        title: body.title ?? currentDay.title,
+                        date: body.date ?? currentDay.date,
+                        orderIndex: currentDay.orderIndex,
+                        items: currentDay.items
+                    )
                 }
             } catch {
                 self.error = error.localizedDescription
@@ -1573,13 +1847,24 @@ struct EntryDetailView: View {
             }
         }
 
+        @discardableResult
         func addItem(to day: TripDay,
                      type: String,
                      title: String,
                      notes: String?,
-                     time: String?) async {
+                     time: String?) async -> String? {
+            guard !isSavingItem else {
+                return "An itinerary item is already being saved."
+            }
+            guard let currentDay = days.first(where: { $0.id == day.id }) else {
+                let message = "This itinerary day is no longer available."
+                error = message
+                return message
+            }
+            isSavingItem = true
+            defer { isSavingItem = false }
             do {
-                let nextOrder = (day.items.map {
+                let nextOrder = (currentDay.items.map {
                     $0.orderIndex }.max() ?? -1) + 1
                 let body = CreateDayItemRequest(
                     type: type,
@@ -1588,12 +1873,11 @@ struct EntryDetailView: View {
                     time: time,
                     orderIndex: nextOrder,
                     placeId: nil)
-                let newItem: TripDayItem = try await
-                    APIClient.shared.request(
-                        .dayItems(tripId: tripId,
-                                  dayId: day.id),
-                        method: .post,
-                        body: body)
+                let newItem = try await api.createDayItem(
+                    tripId: tripId,
+                    dayId: day.id,
+                    body: body
+                )
                 if let i = days.firstIndex(
                     where: { $0.id == day.id }) {
                     let updatedDay = days[i]
@@ -1608,8 +1892,11 @@ struct EntryDetailView: View {
                         orderIndex: updatedDay.orderIndex,
                         items: items)
                 }
+                return nil
             } catch {
-                self.error = error.localizedDescription
+                let message = error.localizedDescription
+                self.error = message
+                return message
             }
         }
 
@@ -1635,8 +1922,9 @@ struct EntryDetailView: View {
                 items: items)
         }
 
+        @discardableResult
         func deleteItem(dayId: String,
-                        itemId: String) async {
+                        itemId: String) async -> String? {
             do {
                 try await APIClient.shared.requestVoid(
                     .dayItem(tripId: tripId,
@@ -1657,8 +1945,11 @@ struct EntryDetailView: View {
                         orderIndex: updatedDay.orderIndex,
                         items: items)
                 }
+                return nil
             } catch {
-                self.error = error.localizedDescription
+                let message = error.localizedDescription
+                self.error = message
+                return message
             }
         }
     }
@@ -1667,12 +1958,14 @@ struct EntryDetailView: View {
 
     struct ItineraryTabView: View {
         let tripId: String
+        let places: [TripPlace]
         @StateObject var viewModel: ItineraryViewModel
         @State private var showAddItem = false
         @State private var selectedDay: TripDay? = nil
         @State private var expandedDayId: String? = nil
         @State private var toast: BPToast? = nil
         @State private var itemToEdit: ItemEditingContext? = nil
+        @State private var placeToView: PlaceDetailContext? = nil
 
         /// Carries the dayId alongside the item so .sheet(item:) doesn't have
         /// to derive it from a model field that's no longer on the wire.
@@ -1682,8 +1975,16 @@ struct EntryDetailView: View {
             var id: String { item.id }
         }
 
-        init(tripId: String, days: [TripDay]) {
+        private struct PlaceDetailContext: Identifiable {
+            let dayId: String
+            let item: TripDayItem
+            let place: TripPlace
+            var id: String { item.id }
+        }
+
+        init(tripId: String, days: [TripDay], places: [TripPlace] = []) {
             self.tripId = tripId
+            self.places = places
             _viewModel = StateObject(wrappedValue:
                 ItineraryViewModel(tripId: tripId,
                                    days: days))
@@ -1700,6 +2001,7 @@ struct EntryDetailView: View {
                         message: "Add your first day to"
                             + " start planning.",
                         actionTitle: "Add day",
+                        isLoading: viewModel.isAddingDay,
                         action: {
                             Task { await viewModel.addDay() }
                         }
@@ -1728,10 +2030,22 @@ struct EntryDetailView: View {
                                         showAddItem = true
                                     },
                                     onEditItem: { item in
-                                        itemToEdit = ItemEditingContext(
-                                            dayId: day.id,
-                                            item: item
-                                        )
+                                        if item.itemType == .place,
+                                           let placeId = item.placeId,
+                                           let place = places.first(where: {
+                                               $0.placeId == placeId
+                                           }) {
+                                            placeToView = PlaceDetailContext(
+                                                dayId: day.id,
+                                                item: item,
+                                                place: place
+                                            )
+                                        } else {
+                                            itemToEdit = ItemEditingContext(
+                                                dayId: day.id,
+                                                item: item
+                                            )
+                                        }
                                     },
                                     onDeleteItem: {
                                         itemId in
@@ -1783,14 +2097,12 @@ struct EntryDetailView: View {
                 if let day = selectedDay {
                     AddDayItemSheet(day: day) {
                         type, title, notes, time in
-                        Task {
-                            await viewModel.addItem(
-                                to: day,
-                                type: type,
-                                title: title,
-                                notes: notes,
-                                time: time)
-                        }
+                        await viewModel.addItem(
+                            to: day,
+                            type: type,
+                            title: title,
+                            notes: notes,
+                            time: time)
                     }
                     .presentationDetents([.medium, .large])
                     .presentationDragIndicator(.hidden)
@@ -1805,15 +2117,28 @@ struct EntryDetailView: View {
                         viewModel.replaceDayItem(updated)
                     },
                     onDelete: {
-                        Task {
-                            await viewModel.deleteItem(
-                                dayId: context.dayId,
-                                itemId: context.item.id)
-                        }
+                        await viewModel.deleteItem(
+                            dayId: context.dayId,
+                            itemId: context.item.id)
                     }
                 )
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.hidden)
+            }
+            .sheet(item: $placeToView) { context in
+                ItineraryPlaceDetailSheet(
+                    place: context.place,
+                    onEdit: {
+                        placeToView = nil
+                        Task { @MainActor in
+                            await Task.yield()
+                            itemToEdit = ItemEditingContext(
+                                dayId: context.dayId,
+                                item: context.item
+                            )
+                        }
+                    }
+                )
             }
             .onChange(of: viewModel.error) { _, error in
                 if let error {
@@ -1822,6 +2147,115 @@ struct EntryDetailView: View {
                 }
             }
             .bpToast($toast)
+        }
+    }
+
+    struct PlaceNavigationURLs {
+        static func appleMaps(for place: TripPlace) -> URL? {
+            guard let latitude = place.latitude,
+                  let longitude = place.longitude else { return nil }
+            var components = URLComponents(string: "https://maps.apple.com/")
+            components?.queryItems = [
+                URLQueryItem(name: "daddr", value: "\(latitude),\(longitude)"),
+                URLQueryItem(name: "q", value: place.placeName)
+            ]
+            return components?.url
+        }
+
+        static func googleMaps(for place: TripPlace) -> URL? {
+            guard let latitude = place.latitude,
+                  let longitude = place.longitude else { return nil }
+            var components = URLComponents(string: "https://www.google.com/maps/dir/")
+            components?.queryItems = [
+                URLQueryItem(name: "api", value: "1"),
+                URLQueryItem(name: "destination", value: "\(latitude),\(longitude)")
+            ]
+            return components?.url
+        }
+    }
+
+    struct ItineraryPlaceDetailSheet: View {
+        let place: TripPlace
+        let onEdit: () -> Void
+        @Environment(\.dismiss) private var dismiss
+        @Environment(\.openURL) private var openURL
+        @State private var showDirections = false
+        @State private var position: MapCameraPosition
+
+        init(place: TripPlace, onEdit: @escaping () -> Void) {
+            self.place = place
+            self.onEdit = onEdit
+            if let latitude = place.latitude, let longitude = place.longitude {
+                _position = State(initialValue: .region(MKCoordinateRegion(
+                    center: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
+                    span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
+                )))
+            } else {
+                _position = State(initialValue: .automatic)
+            }
+        }
+
+        var body: some View {
+            NavigationStack {
+                VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(place.placeName)
+                            .font(.bpHeadline)
+                            .foregroundColor(.bpInk)
+                        if let category = place.category, !category.isEmpty {
+                            Text(category)
+                                .font(.bpCallout)
+                                .foregroundColor(.bpTextSecondary)
+                        }
+                    }
+
+                    if let latitude = place.latitude, let longitude = place.longitude {
+                        Map(position: $position) {
+                            Marker(
+                                place.placeName,
+                                coordinate: CLLocationCoordinate2D(
+                                    latitude: latitude,
+                                    longitude: longitude
+                                )
+                            )
+                        }
+                        .frame(minHeight: 260)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+
+                        BPButton("Directions", style: .primary) {
+                            showDirections = true
+                        }
+                    } else {
+                        BPEmptyState(
+                            icon: "map",
+                            title: "Location unavailable",
+                            message: "This place does not have stored coordinates."
+                        )
+                    }
+                    Spacer()
+                }
+                .padding(20)
+                .background(Color.bpBackground)
+                .navigationTitle("Place")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .navigationBarLeading) {
+                        Button("Done") { dismiss() }
+                    }
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        Button("Edit", action: onEdit)
+                    }
+                }
+                .confirmationDialog("Open directions in", isPresented: $showDirections) {
+                    if let url = PlaceNavigationURLs.appleMaps(for: place) {
+                        Button("Apple Maps") { openURL(url) }
+                    }
+                    if let url = PlaceNavigationURLs.googleMaps(for: place) {
+                        Button("Google Maps") { openURL(url) }
+                    }
+                    Button("Cancel", role: .cancel) {}
+                }
+            }
         }
     }
 
@@ -2003,13 +2437,15 @@ struct EntryDetailView: View {
 
     struct AddDayItemSheet: View {
         let day: TripDay
-        let onAdd: (String, String, String?, String?) -> Void
+        let onAdd: (String, String, String?, String?) async -> String?
         @Environment(\.dismiss) var dismiss
 
         @State private var selectedType = "place"
         @State private var title = ""
         @State private var notes = ""
         @State private var time = ""
+        @State private var isSaving = false
+        @State private var saveError: String? = nil
 
         let types = [
             ("place", "mappin", "Place"),
@@ -2108,21 +2544,30 @@ struct EntryDetailView: View {
                     }
                     .padding(16)
 
+                    if let saveError {
+                        HStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.circle")
+                                .foregroundColor(.bpError)
+                            Text(saveError)
+                                .font(.bpCallout)
+                                .foregroundColor(.bpError)
+                            Spacer()
+                        }
+                        .padding(14)
+                        .background(Color.bpError.opacity(0.06))
+                    }
+
                     Spacer()
 
                     BPButton(
                         "Add to Day \(day.dayNumber)",
-                        style: .primary
+                        style: .primary,
+                        isLoading: isSaving
                     ) {
-                        onAdd(
-                            selectedType,
-                            title,
-                            notes.isEmpty ? nil : notes,
-                            time.isEmpty ? nil : time)
-                        dismiss()
+                        Task { await save() }
                     }
                     .disabled(title.trimmingCharacters(
-                        in: .whitespaces).isEmpty)
+                        in: .whitespaces).isEmpty || isSaving)
                     .padding(16)
                 }
                 .background(Color.bpBackground)
@@ -2137,6 +2582,7 @@ struct EntryDetailView: View {
                         Button("Cancel") { dismiss() }
                             .buttonStyle(.plain)
                             .foregroundColor(.bpTextSecondary)
+                            .disabled(isSaving)
                     }
                     ToolbarItem(placement: .principal) {
                         Text("Add to Day \(day.dayNumber)")
@@ -2144,6 +2590,25 @@ struct EntryDetailView: View {
                             .foregroundColor(.bpInk)
                     }
                 }
+            }
+            .interactiveDismissDisabled(isSaving)
+        }
+
+        private func save() async {
+            guard !isSaving else { return }
+            isSaving = true
+            saveError = nil
+            defer { isSaving = false }
+            let error = await onAdd(
+                selectedType,
+                title,
+                notes.isEmpty ? nil : notes,
+                time.isEmpty ? nil : time
+            )
+            if let error {
+                saveError = error
+            } else {
+                dismiss()
             }
         }
 
@@ -2157,6 +2622,22 @@ struct EntryDetailView: View {
         }
     }
 
+    enum ItemEditorMutationState: Equatable {
+        case idle
+        case saving
+        case deleting
+
+        mutating func begin(_ operation: Self) -> Bool {
+            guard self == .idle, operation != .idle else { return false }
+            self = operation
+            return true
+        }
+
+        mutating func finish() {
+            self = .idle
+        }
+    }
+
     // MARK: - DayItemEditorSheet
 
     struct DayItemEditorSheet: View {
@@ -2164,14 +2645,14 @@ struct EntryDetailView: View {
         let dayId: String
         let item: TripDayItem
         let onSave: (TripDayItem) -> Void
-        let onDelete: () -> Void
+        let onDelete: () async -> String?
         @Environment(\.dismiss) private var dismiss
 
         @State private var title: String
         @State private var selectedType: String
         @State private var notes: String
         @State private var time: String
-        @State private var isSaving = false
+        @State private var mutationState = ItemEditorMutationState.idle
         @State private var saveError: String? = nil
         @State private var showDeleteConfirm = false
 
@@ -2187,7 +2668,7 @@ struct EntryDetailView: View {
             dayId: String,
             item: TripDayItem,
             onSave: @escaping (TripDayItem) -> Void,
-            onDelete: @escaping () -> Void
+            onDelete: @escaping () async -> String?
         ) {
             self.tripId = tripId
             self.dayId = dayId
@@ -2212,7 +2693,7 @@ struct EntryDetailView: View {
         }
 
         private var canSave: Bool {
-            !trimmedTitle.isEmpty && hasChanges && !isSaving
+            !trimmedTitle.isEmpty && hasChanges && mutationState == .idle
         }
 
         var body: some View {
@@ -2323,8 +2804,14 @@ struct EntryDetailView: View {
                         showDeleteConfirm = true
                     } label: {
                         HStack(spacing: 8) {
-                            Image(systemName: "trash")
-                                .font(.system(size: 15))
+                            if mutationState == .deleting {
+                                ProgressView()
+                                    .tint(.bpError)
+                                    .scaleEffect(0.8)
+                            } else {
+                                Image(systemName: "trash")
+                                    .font(.system(size: 15))
+                            }
                             Text("Delete item")
                                 .font(.bpBodyBold)
                             Spacer()
@@ -2335,6 +2822,7 @@ struct EntryDetailView: View {
                         .background(Color.bpError.opacity(0.06))
                     }
                     .buttonStyle(.plain)
+                    .disabled(mutationState != .idle)
                 }
                 .background(Color.bpBackground)
                 .navigationBarTitleDisplayMode(.inline)
@@ -2345,6 +2833,7 @@ struct EntryDetailView: View {
                         Button("Cancel") { dismiss() }
                             .buttonStyle(.plain)
                             .foregroundColor(.bpTextSecondary)
+                            .disabled(mutationState != .idle)
                     }
                     ToolbarItem(placement: .principal) {
                         Text("Edit item")
@@ -2355,7 +2844,7 @@ struct EntryDetailView: View {
                         Button {
                             Task { await save() }
                         } label: {
-                            if isSaving {
+                            if mutationState == .saving {
                                 ProgressView().tint(.bpCobalt)
                             } else {
                                 Text("Save")
@@ -2373,24 +2862,25 @@ struct EntryDetailView: View {
                     isPresented: $showDeleteConfirm
                 ) {
                     Button("Delete", role: .destructive) {
-                        onDelete()
-                        dismiss()
+                        Task { await delete() }
                     }
                     Button("Cancel", role: .cancel) {}
                 } message: {
                     Text("This cannot be undone.")
                 }
             }
+            .interactiveDismissDisabled(mutationState != .idle)
         }
 
         private func save() async {
-            isSaving = true
+            guard mutationState.begin(.saving) else { return }
             saveError = nil
+            defer { mutationState.finish() }
             do {
                 let updated = try await APIClient.shared.updateDayItem(
                     tripId: tripId,
                     dayId: dayId,
-                    itemId: item.id,
+                    item: item,
                     title: trimmedTitle,
                     type: selectedType,
                     notes: notes.isEmpty ? nil : notes,
@@ -2401,7 +2891,17 @@ struct EntryDetailView: View {
             } catch {
                 saveError = error.localizedDescription
             }
-            isSaving = false
+        }
+
+        private func delete() async {
+            guard mutationState.begin(.deleting) else { return }
+            saveError = nil
+            defer { mutationState.finish() }
+            if let error = await onDelete() {
+                saveError = error
+            } else {
+                dismiss()
+            }
         }
 
         private var titlePlaceholder: String {
@@ -3492,6 +3992,13 @@ struct EntryDetailView: View {
     }
     
     // MARK: - EditTripViewModel
+
+    @MainActor
+    protocol TripSettingsAPIProviding {
+        func updateTrip(id: String, body: UpdateTripRequest) async throws -> Trip
+    }
+
+    extension APIClient: TripSettingsAPIProviding {}
     
     @MainActor
     final class EditTripViewModel: ObservableObject {
@@ -3500,19 +4007,36 @@ struct EntryDetailView: View {
         
         @Published var title: String
         @Published var visibility: String
+        @Published var isDraft: Bool
         @Published var isPlanning: Bool
         @Published var coverPhotoUrl: String?
         @Published var isSaving = false
         @Published var saveError: String? = nil
+        @Published var activeTransition: TripStateTransition? = nil
+
+        enum TripStateTransition: Equatable {
+            case publishing
+            case movingToDraft
+            case makingPublic
+            case makingPrivate
+        }
+
+        private let api: any TripSettingsAPIProviding
 
         @Published var selectedPhoto: UnsplashPhoto? = nil
         @Published var showUnsplashPicker = false
 
-        init(trip: Trip, onSave: @escaping (Trip) -> Void) {
+        init(
+            trip: Trip,
+            api: (any TripSettingsAPIProviding)? = nil,
+            onSave: @escaping (Trip) -> Void
+        ) {
             self.trip = trip
+            self.api = api ?? APIClient.shared
             self.onSave = onSave
             self.title = trip.title
             self.visibility = trip.visibility
+            self.isDraft = trip.isDraft
             self.isPlanning = trip.isPlanning
             self.coverPhotoUrl = trip.coverPhotoUrl
         }
@@ -3522,28 +4046,54 @@ struct EntryDetailView: View {
             coverPhotoUrl = photo.fullURL?.absoluteString
         }
         
-        func save() async {
-            guard !title.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        @discardableResult
+        func save() async -> Bool {
+            guard !title.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+            guard !isSaving, activeTransition == nil else { return false }
             isSaving = true
+            defer { isSaving = false }
             saveError = nil
             do {
                 let body = UpdateTripRequest(
                     title: title,
-                    visibility: visibility,
-                    isDraft: trip.isDraft,
                     isPlanning: isPlanning,
                     coverPhotoUrl: coverPhotoUrl
                 )
-                let updated: Trip = try await APIClient.shared.request(
-                    .trip(id: trip.id),
-                    method: .put,
-                    body: body
-                )
+                let updated = try await api.updateTrip(id: trip.id, body: body)
+                onSave(updated)
+                return true
+            } catch {
+                saveError = error.localizedDescription
+                return false
+            }
+        }
+
+        func changeState(_ transition: TripStateTransition) async {
+            guard activeTransition == nil, !isSaving else { return }
+            activeTransition = transition
+            saveError = nil
+            defer { activeTransition = nil }
+
+            let body: UpdateTripRequest
+            switch transition {
+            case .publishing:
+                body = UpdateTripRequest(isDraft: false)
+            case .movingToDraft:
+                body = UpdateTripRequest(isDraft: true)
+            case .makingPublic:
+                body = UpdateTripRequest(visibility: "public")
+            case .makingPrivate:
+                body = UpdateTripRequest(visibility: "private")
+            }
+
+            do {
+                let updated = try await api.updateTrip(id: trip.id, body: body)
+                isDraft = updated.isDraft
+                visibility = updated.visibility
                 onSave(updated)
             } catch {
                 saveError = error.localizedDescription
             }
-            isSaving = false
         }
     }
     
@@ -3710,14 +4260,36 @@ struct EntryDetailView: View {
     
     struct EditTripView: View {
         @StateObject var viewModel: EditTripViewModel
+        let hasExploreSubmission: Bool
         @Environment(\.dismiss) var dismiss
+        @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+        @State private var confirmation: EditTripViewModel.TripStateTransition? = nil
         
-        init(trip: Trip, onSave: @escaping (Trip) -> Void) {
+        init(
+            trip: Trip,
+            hasExploreSubmission: Bool = false,
+            onSave: @escaping (Trip) -> Void
+        ) {
+            self.hasExploreSubmission = hasExploreSubmission
             _viewModel = StateObject(wrappedValue: EditTripViewModel(
                 trip: trip,
                 onSave: onSave
             ))
         }
+
+#if DEBUG
+        init(
+            verificationTrip trip: Trip,
+            hasExploreSubmission: Bool,
+            error: String?,
+            onSave: @escaping (Trip) -> Void
+        ) {
+            self.hasExploreSubmission = hasExploreSubmission
+            let viewModel = EditTripViewModel(trip: trip, onSave: onSave)
+            viewModel.saveError = error
+            _viewModel = StateObject(wrappedValue: viewModel)
+        }
+#endif
         
         var body: some View {
             NavigationStack {
@@ -3749,7 +4321,11 @@ struct EntryDetailView: View {
                                 .tint(.bpCobalt)
                         } else {
                             Button("Save") {
-                                Task { await viewModel.save() }
+                                Task {
+                                    if await viewModel.save() {
+                                        dismiss()
+                                    }
+                                }
                             }
                             .buttonStyle(.plain)
                             .font(.bpBodyBold)
@@ -3770,6 +4346,24 @@ struct EntryDetailView: View {
                         .presentationDragIndicator(.hidden)
                 }
                 .presentationDragIndicator(.hidden)
+                .interactiveDismissDisabled(
+                    viewModel.isSaving || viewModel.activeTransition != nil
+                )
+                .confirmationDialog(
+                    confirmationTitle,
+                    isPresented: Binding(
+                        get: { confirmation != nil },
+                        set: { if !$0 { confirmation = nil } }
+                    ),
+                    presenting: confirmation
+                ) { transition in
+                    Button(transitionActionTitle(transition), role: .destructive) {
+                        Task { await viewModel.changeState(transition) }
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: { _ in
+                    Text("If this trip has a pending or approved Explore submission, the server will keep the current state until withdrawal or removal is resolved.")
+                }
             }
         }
         
@@ -3826,10 +4420,6 @@ struct EntryDetailView: View {
         
         private var formFields: some View {
             VStack(spacing: 24) {
-                titleField
-                modeToggle
-                visibilityList
-                
                 if let err = viewModel.saveError {
                     HStack(spacing: 10) {
                         Image(systemName: "exclamationmark.circle")
@@ -3843,8 +4433,32 @@ struct EntryDetailView: View {
                     .background(Color.bpError.opacity(0.06))
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
+
+                titleField
+                modeToggle
+                lifecycleList
+                visibilityList
             }
             .padding(20)
+        }
+
+        private var lifecycleList: some View {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("STATUS")
+                    .font(.bpLabel)
+                    .foregroundColor(.bpTextMuted)
+                    .tracking(1.0)
+                Text("Publishing marks the trip as complete. Visibility separately controls who can see it.")
+                    .font(.bpCaption)
+                    .foregroundColor(.bpTextSecondary)
+                stateAction(
+                    title: viewModel.isDraft ? "Draft" : "Published",
+                    actionTitle: viewModel.isDraft ? "Publish trip" : "Move back to drafts",
+                    transition: viewModel.isDraft ? .publishing : .movingToDraft,
+                    destructive: !viewModel.isDraft,
+                    disabled: !viewModel.isDraft && viewModel.visibility.lowercased() == "public"
+                )
+            }
         }
         
         private var titleField: some View {
@@ -3867,12 +4481,15 @@ struct EntryDetailView: View {
         }
         
         private var modeToggle: some View {
-            VStack(alignment: .leading, spacing: 8) {
+            let layout = dynamicTypeSize.isAccessibilitySize
+                ? AnyLayout(VStackLayout(spacing: 8))
+                : AnyLayout(HStackLayout(spacing: 0))
+            return VStack(alignment: .leading, spacing: 8) {
                 Text("MODE")
                     .font(.bpLabel)
                     .foregroundColor(.bpTextMuted)
                     .tracking(1.0)
-                HStack(spacing: 0) {
+                layout {
                     modeOption(isPlanning: false, label: "Documenting", icon: "pencil")
                     modeOption(isPlanning: true, label: "Planning", icon: "calendar")
                 }
@@ -3914,8 +4531,6 @@ struct EntryDetailView: View {
                 VStack(spacing: 0) {
                     visibilityOption("Private")
                     BPDivider()
-                    visibilityOption("Collaborative")
-                    BPDivider()
                     visibilityOption("Public")
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -3928,8 +4543,15 @@ struct EntryDetailView: View {
         
         private func visibilityOption(_ option: String) -> some View {
             let isSelected = viewModel.visibility.lowercased() == option.lowercased()
+            let transition: EditTripViewModel.TripStateTransition = option.lowercased() == "public"
+                ? .makingPublic : .makingPrivate
             return Button {
-                viewModel.visibility = option
+                guard !isSelected else { return }
+                if transition == .makingPrivate && hasExploreSubmission {
+                    confirmation = transition
+                } else {
+                    Task { await viewModel.changeState(transition) }
+                }
             } label: {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
@@ -3945,6 +4567,8 @@ struct EntryDetailView: View {
                         Image(systemName: "checkmark")
                             .foregroundColor(.bpCobalt)
                             .font(.system(size: 14, weight: .semibold))
+                    } else if viewModel.activeTransition == transition {
+                        ProgressView().tint(.bpCobalt)
                     }
                 }
                 .padding(.vertical, 14)
@@ -3952,14 +4576,73 @@ struct EntryDetailView: View {
                 .background(isSelected ? Color.bpCobalt.opacity(0.04) : Color.white)
             }
             .buttonStyle(.plain)
+            .disabled(
+                viewModel.activeTransition != nil
+                || viewModel.isSaving
+                || (transition == .makingPublic && viewModel.isDraft)
+            )
+            .accessibilityLabel("Visibility: \(option)")
         }
         
         private func visibilitySubtitle(_ v: String) -> String {
             switch v.lowercased() {
             case "private":       return "Only you can see this"
-            case "collaborative": return "You and collaborators"
             case "public":        return "Anyone on board_postal"
             default:              return ""
+            }
+        }
+
+        private func stateAction(
+            title: String,
+            actionTitle: String,
+            transition: EditTripViewModel.TripStateTransition,
+            destructive: Bool,
+            disabled: Bool
+        ) -> some View {
+            let layout = dynamicTypeSize.isAccessibilitySize
+                ? AnyLayout(VStackLayout(alignment: .leading, spacing: 12))
+                : AnyLayout(HStackLayout())
+            return layout {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title).font(.bpBodyBold).foregroundColor(.bpInk)
+                    Text(actionTitle).font(.bpCaption).foregroundColor(.bpTextSecondary)
+                }
+                Spacer()
+                if viewModel.activeTransition == transition {
+                    ProgressView().tint(.bpCobalt)
+                } else {
+                    Button(actionTitle) {
+                        if destructive && hasExploreSubmission {
+                            confirmation = transition
+                        } else {
+                            Task { await viewModel.changeState(transition) }
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(disabled || viewModel.activeTransition != nil || viewModel.isSaving)
+                }
+            }
+            .padding(16)
+            .background(Color.white)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.bpBorder))
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Status: \(title). \(actionTitle)")
+        }
+
+        private var confirmationTitle: String {
+            guard let confirmation else { return "Confirm change" }
+            return transitionActionTitle(confirmation) + "?"
+        }
+
+        private func transitionActionTitle(
+            _ transition: EditTripViewModel.TripStateTransition
+        ) -> String {
+            switch transition {
+            case .publishing: return "Publish trip"
+            case .movingToDraft: return "Move back to drafts"
+            case .makingPublic: return "Make public"
+            case .makingPrivate: return "Make private"
             }
         }
     }
@@ -4446,19 +5129,42 @@ struct InviteCollaboratorSheet: View {
             TripsListPreviewWrapper(mockTrips: mockTrips)
         }
     }
-    
-    private struct TripsListPreviewWrapper: View {
-        let mockTrips: [Trip]
-        @StateObject private var viewModel = TripViewModel()
-        
-        var body: some View {
-            TripsListView()
-                .onAppear {
-                    viewModel.trips = mockTrips
-                }
+
+#if DEBUG
+    #Preview("Drafts — One") {
+        NavigationStack {
+            TripsListPreviewWrapper(mockTrips: Array(TripsVisualVerificationData.drafts.prefix(1)))
         }
     }
+
+    #Preview("Drafts — Multiple") {
+        NavigationStack {
+            TripsListPreviewWrapper(mockTrips: TripsVisualVerificationData.drafts)
+        }
+    }
+
+    #Preview("Drafts — Accessibility") {
+        NavigationStack {
+            TripsListPreviewWrapper(mockTrips: TripsVisualVerificationData.drafts)
+        }
+        .environment(\.dynamicTypeSize, .accessibility3)
+    }
+#endif
     
+    private struct TripsListPreviewWrapper: View {
+        @StateObject private var viewModel: TripViewModel
+
+        init(mockTrips: [Trip]) {
+            let viewModel = TripViewModel()
+            viewModel.trips = mockTrips
+            _viewModel = StateObject(wrappedValue: viewModel)
+        }
+        
+        var body: some View {
+            TripsListView(viewModel: viewModel, automaticallyLoadsTrips: false)
+        }
+    }
+
     #Preview("Trip Detail") {
         let mockTrip = Trip(
             id: "1",
