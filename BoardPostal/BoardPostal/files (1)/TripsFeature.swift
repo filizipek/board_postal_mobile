@@ -81,6 +81,12 @@ enum TripsVisualVerificationScenario: String {
     case one
     case two
     case several
+    case privateDraft
+    case publishedPrivate
+    case publishedPublic
+    case blockedPending
+    case blockedListed
+    case accessibility
 
     static var current: Self? {
         let prefix = "--trips-visual-scenario="
@@ -96,6 +102,32 @@ enum TripsVisualVerificationScenario: String {
         case .one: Array(TripsVisualVerificationData.drafts.prefix(1))
         case .two: Array(TripsVisualVerificationData.drafts.prefix(2))
         case .several: TripsVisualVerificationData.drafts
+        case .privateDraft, .publishedPrivate, .publishedPublic,
+             .blockedPending, .blockedListed, .accessibility: []
+        }
+    }
+
+    var settingsTrip: Trip? {
+        switch self {
+        case .privateDraft, .accessibility:
+            TripsVisualVerificationData.settingsTrip(isDraft: true, visibility: "private")
+        case .publishedPrivate:
+            TripsVisualVerificationData.settingsTrip(isDraft: false, visibility: "private")
+        case .publishedPublic, .blockedPending, .blockedListed:
+            TripsVisualVerificationData.settingsTrip(isDraft: false, visibility: "public")
+        default:
+            nil
+        }
+    }
+
+    var blockingError: String? {
+        switch self {
+        case .blockedPending:
+            "Cannot make this trip private while its Explore submission is pending. Explore withdrawal or removal must be resolved first."
+        case .blockedListed:
+            "Cannot move this trip back to drafts while its Explore submission is approved/listed. Explore withdrawal or removal must be resolved first."
+        default:
+            nil
         }
     }
 }
@@ -130,20 +162,58 @@ enum TripsVisualVerificationData {
             destinations: [TripDestination(id: "\(id)-destination", country: country, city: city, orderIndex: 0)]
         )
     }
+
+    static func settingsTrip(isDraft: Bool, visibility: String) -> Trip {
+        Trip(
+            id: "settings-trip",
+            title: "A Week Along the Aegean Coast",
+            description: "Deterministic lifecycle verification trip",
+            coverPhotoUrl: nil,
+            plannedStartDate: nil,
+            plannedEndDate: nil,
+            actualStartDate: nil,
+            actualEndDate: nil,
+            visibility: visibility,
+            country: "Türkiye",
+            city: "İzmir",
+            isDraft: isDraft,
+            isPlanning: false,
+            createdAt: Date(timeIntervalSince1970: 1_750_000_000),
+            ownerId: "visual-verification-owner",
+            entryCount: 3,
+            dayCount: 4,
+            destinations: []
+        )
+    }
 }
 
 struct TripsVisualVerificationView: View {
     @StateObject private var viewModel: TripViewModel
 
     init(scenario: TripsVisualVerificationScenario) {
+        self.scenario = scenario
         let viewModel = TripViewModel()
         viewModel.trips = scenario.trips
         _viewModel = StateObject(wrappedValue: viewModel)
     }
 
     var body: some View {
-        TripsListView(viewModel: viewModel, automaticallyLoadsTrips: false)
+        if let trip = scenario.settingsTrip {
+            EditTripView(
+                verificationTrip: trip,
+                hasExploreSubmission: scenario.blockingError != nil,
+                error: scenario.blockingError
+            ) { _ in }
+            .environment(
+                \.dynamicTypeSize,
+                scenario == .accessibility ? .accessibility3 : .large
+            )
+        } else {
+            TripsListView(viewModel: viewModel, automaticallyLoadsTrips: false)
+        }
     }
+
+    private let scenario: TripsVisualVerificationScenario
 }
 #endif
 
@@ -467,7 +537,7 @@ final class TripDetailViewModel: ObservableObject {
     @Published var isSubmitting = false
     @Published var error: String?
 
-    let trip: Trip
+    @Published var trip: Trip
     private let api: APIClient
     private let submissionAPI: any SubmissionAPIProviding
 
@@ -674,6 +744,8 @@ struct TripDetailView: View {
                 Button {
                     if currentTrip.visibility.lowercased() == "public" {
                         showShareSheet = true
+                    } else if currentTrip.isDraft {
+                        showEditTrip = true
                     } else {
                         showMakePublicAlert = true
                     }
@@ -726,9 +798,14 @@ struct TripDetailView: View {
             .presentationDragIndicator(.hidden)
         }
         .sheet(isPresented: $showEditTrip) {
-            EditTripView(trip: currentTrip) { updated in
+            EditTripView(
+                trip: currentTrip,
+                hasExploreSubmission: viewModel.submission.map {
+                    ["pending", "approved"].contains($0.status.lowercased())
+                } ?? false
+            ) { updated in
                 currentTrip = updated
-                showEditTrip = false
+                viewModel.trip = updated
                 toast = BPToast(message: "Trip updated")
                 Task { await viewModel.loadAll() }
                 NotificationCenter.default.post(
@@ -829,6 +906,27 @@ struct TripDetailView: View {
 
                 BPDivider()
 
+                VStack(alignment: .leading, spacing: 10) {
+                    submissionRequirement(
+                        "Trip must be published",
+                        met: !currentTrip.isDraft
+                    )
+                    submissionRequirement(
+                        "Trip must be public",
+                        met: currentTrip.visibility.lowercased() == "public"
+                    )
+                    submissionRequirement(
+                        "At least three entries",
+                        met: currentTrip.entryCount >= 3
+                    )
+                    submissionRequirement(
+                        "At least one place",
+                        met: !viewModel.places.isEmpty
+                    )
+                }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 16)
+
                 // Optional message
                 VStack(alignment: .leading, spacing: 8) {
                     Text("MESSAGE (OPTIONAL)")
@@ -873,6 +971,10 @@ struct TripDetailView: View {
                             submitError = eligibilityError
                             return
                         }
+                        if viewModel.places.isEmpty {
+                            submitError = "Trip must have at least 1 place."
+                            return
+                        }
                         let error = await viewModel.submitForPublication(
                             message: submitMessage.isEmpty ? nil : submitMessage
                         )
@@ -884,6 +986,11 @@ struct TripDetailView: View {
                         }
                     }
                 }
+                .disabled(
+                    viewModel.submissionEligibilityError != nil
+                    || viewModel.places.isEmpty
+                    || viewModel.isSubmitting
+                )
                 .padding(20)
 
                 Spacer()
@@ -911,6 +1018,13 @@ struct TripDetailView: View {
         }
         .presentationDetents([.medium])
         .interactiveDismissDisabled(viewModel.isSubmitting)
+    }
+
+    private func submissionRequirement(_ title: String, met: Bool) -> some View {
+        Label(title, systemImage: met ? "checkmark.circle.fill" : "circle")
+            .font(.bpCallout)
+            .foregroundColor(met ? .bpCobalt : .bpTextSecondary)
+            .accessibilityLabel("\(title): \(met ? "met" : "not met")")
     }
 
     // MARK: - Share helpers
@@ -954,25 +1068,21 @@ struct TripDetailView: View {
         do {
             let body = UpdateTripRequest(
                 title: nil,
-                visibility: "Public",
+                visibility: "public",
                 isDraft: nil,
                 isPlanning: nil,
                 coverPhotoUrl: nil
             )
-            let updated: Trip = try await APIClient.shared.request(
-                .trip(id: currentTrip.id),
-                method: .put,
-                body: body
-            )
+            let updated = try await APIClient.shared.updateTrip(id: currentTrip.id, body: body)
             currentTrip = updated
+            viewModel.trip = updated
             NotificationCenter.default.post(
                 name: .bpTripUpdated,
                 object: currentTrip.id
             )
             showShareSheet = true
         } catch {
-            // Best-effort — still surface the share sheet
-            showShareSheet = true
+            toast = BPToast(message: error.localizedDescription)
         }
     }
 
@@ -994,7 +1104,7 @@ struct TripDetailView: View {
                 Button {
                     showEditTrip = true
                 } label: {
-                    Label("Edit trip", systemImage: "slider.horizontal.3")
+                    Label("Trip settings", systemImage: "slider.horizontal.3")
                 }
 
                 Button {
@@ -1016,8 +1126,7 @@ struct TripDetailView: View {
                 }
                 .disabled(isExportingPDF)
 
-                if currentTrip.visibility.lowercased() == "public"
-                    && !currentTrip.isDraft {
+                if KeychainService.shared.userId == currentTrip.ownerId {
                     Divider()
                     if let sub = viewModel.submission {
                         switch sub.status.lowercased() {
@@ -3883,6 +3992,13 @@ struct EntryDetailView: View {
     }
     
     // MARK: - EditTripViewModel
+
+    @MainActor
+    protocol TripSettingsAPIProviding {
+        func updateTrip(id: String, body: UpdateTripRequest) async throws -> Trip
+    }
+
+    extension APIClient: TripSettingsAPIProviding {}
     
     @MainActor
     final class EditTripViewModel: ObservableObject {
@@ -3891,19 +4007,36 @@ struct EntryDetailView: View {
         
         @Published var title: String
         @Published var visibility: String
+        @Published var isDraft: Bool
         @Published var isPlanning: Bool
         @Published var coverPhotoUrl: String?
         @Published var isSaving = false
         @Published var saveError: String? = nil
+        @Published var activeTransition: TripStateTransition? = nil
+
+        enum TripStateTransition: Equatable {
+            case publishing
+            case movingToDraft
+            case makingPublic
+            case makingPrivate
+        }
+
+        private let api: any TripSettingsAPIProviding
 
         @Published var selectedPhoto: UnsplashPhoto? = nil
         @Published var showUnsplashPicker = false
 
-        init(trip: Trip, onSave: @escaping (Trip) -> Void) {
+        init(
+            trip: Trip,
+            api: (any TripSettingsAPIProviding)? = nil,
+            onSave: @escaping (Trip) -> Void
+        ) {
             self.trip = trip
+            self.api = api ?? APIClient.shared
             self.onSave = onSave
             self.title = trip.title
             self.visibility = trip.visibility
+            self.isDraft = trip.isDraft
             self.isPlanning = trip.isPlanning
             self.coverPhotoUrl = trip.coverPhotoUrl
         }
@@ -3913,28 +4046,54 @@ struct EntryDetailView: View {
             coverPhotoUrl = photo.fullURL?.absoluteString
         }
         
-        func save() async {
-            guard !title.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        @discardableResult
+        func save() async -> Bool {
+            guard !title.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+            guard !isSaving, activeTransition == nil else { return false }
             isSaving = true
+            defer { isSaving = false }
             saveError = nil
             do {
                 let body = UpdateTripRequest(
                     title: title,
-                    visibility: visibility,
-                    isDraft: trip.isDraft,
                     isPlanning: isPlanning,
                     coverPhotoUrl: coverPhotoUrl
                 )
-                let updated: Trip = try await APIClient.shared.request(
-                    .trip(id: trip.id),
-                    method: .put,
-                    body: body
-                )
+                let updated = try await api.updateTrip(id: trip.id, body: body)
+                onSave(updated)
+                return true
+            } catch {
+                saveError = error.localizedDescription
+                return false
+            }
+        }
+
+        func changeState(_ transition: TripStateTransition) async {
+            guard activeTransition == nil, !isSaving else { return }
+            activeTransition = transition
+            saveError = nil
+            defer { activeTransition = nil }
+
+            let body: UpdateTripRequest
+            switch transition {
+            case .publishing:
+                body = UpdateTripRequest(isDraft: false)
+            case .movingToDraft:
+                body = UpdateTripRequest(isDraft: true)
+            case .makingPublic:
+                body = UpdateTripRequest(visibility: "public")
+            case .makingPrivate:
+                body = UpdateTripRequest(visibility: "private")
+            }
+
+            do {
+                let updated = try await api.updateTrip(id: trip.id, body: body)
+                isDraft = updated.isDraft
+                visibility = updated.visibility
                 onSave(updated)
             } catch {
                 saveError = error.localizedDescription
             }
-            isSaving = false
         }
     }
     
@@ -4101,14 +4260,36 @@ struct EntryDetailView: View {
     
     struct EditTripView: View {
         @StateObject var viewModel: EditTripViewModel
+        let hasExploreSubmission: Bool
         @Environment(\.dismiss) var dismiss
+        @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+        @State private var confirmation: EditTripViewModel.TripStateTransition? = nil
         
-        init(trip: Trip, onSave: @escaping (Trip) -> Void) {
+        init(
+            trip: Trip,
+            hasExploreSubmission: Bool = false,
+            onSave: @escaping (Trip) -> Void
+        ) {
+            self.hasExploreSubmission = hasExploreSubmission
             _viewModel = StateObject(wrappedValue: EditTripViewModel(
                 trip: trip,
                 onSave: onSave
             ))
         }
+
+#if DEBUG
+        init(
+            verificationTrip trip: Trip,
+            hasExploreSubmission: Bool,
+            error: String?,
+            onSave: @escaping (Trip) -> Void
+        ) {
+            self.hasExploreSubmission = hasExploreSubmission
+            let viewModel = EditTripViewModel(trip: trip, onSave: onSave)
+            viewModel.saveError = error
+            _viewModel = StateObject(wrappedValue: viewModel)
+        }
+#endif
         
         var body: some View {
             NavigationStack {
@@ -4140,7 +4321,11 @@ struct EntryDetailView: View {
                                 .tint(.bpCobalt)
                         } else {
                             Button("Save") {
-                                Task { await viewModel.save() }
+                                Task {
+                                    if await viewModel.save() {
+                                        dismiss()
+                                    }
+                                }
                             }
                             .buttonStyle(.plain)
                             .font(.bpBodyBold)
@@ -4161,6 +4346,24 @@ struct EntryDetailView: View {
                         .presentationDragIndicator(.hidden)
                 }
                 .presentationDragIndicator(.hidden)
+                .interactiveDismissDisabled(
+                    viewModel.isSaving || viewModel.activeTransition != nil
+                )
+                .confirmationDialog(
+                    confirmationTitle,
+                    isPresented: Binding(
+                        get: { confirmation != nil },
+                        set: { if !$0 { confirmation = nil } }
+                    ),
+                    presenting: confirmation
+                ) { transition in
+                    Button(transitionActionTitle(transition), role: .destructive) {
+                        Task { await viewModel.changeState(transition) }
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: { _ in
+                    Text("If this trip has a pending or approved Explore submission, the server will keep the current state until withdrawal or removal is resolved.")
+                }
             }
         }
         
@@ -4217,10 +4420,6 @@ struct EntryDetailView: View {
         
         private var formFields: some View {
             VStack(spacing: 24) {
-                titleField
-                modeToggle
-                visibilityList
-                
                 if let err = viewModel.saveError {
                     HStack(spacing: 10) {
                         Image(systemName: "exclamationmark.circle")
@@ -4234,8 +4433,32 @@ struct EntryDetailView: View {
                     .background(Color.bpError.opacity(0.06))
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
+
+                titleField
+                modeToggle
+                lifecycleList
+                visibilityList
             }
             .padding(20)
+        }
+
+        private var lifecycleList: some View {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("STATUS")
+                    .font(.bpLabel)
+                    .foregroundColor(.bpTextMuted)
+                    .tracking(1.0)
+                Text("Publishing marks the trip as complete. Visibility separately controls who can see it.")
+                    .font(.bpCaption)
+                    .foregroundColor(.bpTextSecondary)
+                stateAction(
+                    title: viewModel.isDraft ? "Draft" : "Published",
+                    actionTitle: viewModel.isDraft ? "Publish trip" : "Move back to drafts",
+                    transition: viewModel.isDraft ? .publishing : .movingToDraft,
+                    destructive: !viewModel.isDraft,
+                    disabled: !viewModel.isDraft && viewModel.visibility.lowercased() == "public"
+                )
+            }
         }
         
         private var titleField: some View {
@@ -4258,12 +4481,15 @@ struct EntryDetailView: View {
         }
         
         private var modeToggle: some View {
-            VStack(alignment: .leading, spacing: 8) {
+            let layout = dynamicTypeSize.isAccessibilitySize
+                ? AnyLayout(VStackLayout(spacing: 8))
+                : AnyLayout(HStackLayout(spacing: 0))
+            return VStack(alignment: .leading, spacing: 8) {
                 Text("MODE")
                     .font(.bpLabel)
                     .foregroundColor(.bpTextMuted)
                     .tracking(1.0)
-                HStack(spacing: 0) {
+                layout {
                     modeOption(isPlanning: false, label: "Documenting", icon: "pencil")
                     modeOption(isPlanning: true, label: "Planning", icon: "calendar")
                 }
@@ -4305,8 +4531,6 @@ struct EntryDetailView: View {
                 VStack(spacing: 0) {
                     visibilityOption("Private")
                     BPDivider()
-                    visibilityOption("Collaborative")
-                    BPDivider()
                     visibilityOption("Public")
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -4319,8 +4543,15 @@ struct EntryDetailView: View {
         
         private func visibilityOption(_ option: String) -> some View {
             let isSelected = viewModel.visibility.lowercased() == option.lowercased()
+            let transition: EditTripViewModel.TripStateTransition = option.lowercased() == "public"
+                ? .makingPublic : .makingPrivate
             return Button {
-                viewModel.visibility = option
+                guard !isSelected else { return }
+                if transition == .makingPrivate && hasExploreSubmission {
+                    confirmation = transition
+                } else {
+                    Task { await viewModel.changeState(transition) }
+                }
             } label: {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
@@ -4336,6 +4567,8 @@ struct EntryDetailView: View {
                         Image(systemName: "checkmark")
                             .foregroundColor(.bpCobalt)
                             .font(.system(size: 14, weight: .semibold))
+                    } else if viewModel.activeTransition == transition {
+                        ProgressView().tint(.bpCobalt)
                     }
                 }
                 .padding(.vertical, 14)
@@ -4343,14 +4576,73 @@ struct EntryDetailView: View {
                 .background(isSelected ? Color.bpCobalt.opacity(0.04) : Color.white)
             }
             .buttonStyle(.plain)
+            .disabled(
+                viewModel.activeTransition != nil
+                || viewModel.isSaving
+                || (transition == .makingPublic && viewModel.isDraft)
+            )
+            .accessibilityLabel("Visibility: \(option)")
         }
         
         private func visibilitySubtitle(_ v: String) -> String {
             switch v.lowercased() {
             case "private":       return "Only you can see this"
-            case "collaborative": return "You and collaborators"
             case "public":        return "Anyone on board_postal"
             default:              return ""
+            }
+        }
+
+        private func stateAction(
+            title: String,
+            actionTitle: String,
+            transition: EditTripViewModel.TripStateTransition,
+            destructive: Bool,
+            disabled: Bool
+        ) -> some View {
+            let layout = dynamicTypeSize.isAccessibilitySize
+                ? AnyLayout(VStackLayout(alignment: .leading, spacing: 12))
+                : AnyLayout(HStackLayout())
+            return layout {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title).font(.bpBodyBold).foregroundColor(.bpInk)
+                    Text(actionTitle).font(.bpCaption).foregroundColor(.bpTextSecondary)
+                }
+                Spacer()
+                if viewModel.activeTransition == transition {
+                    ProgressView().tint(.bpCobalt)
+                } else {
+                    Button(actionTitle) {
+                        if destructive && hasExploreSubmission {
+                            confirmation = transition
+                        } else {
+                            Task { await viewModel.changeState(transition) }
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(disabled || viewModel.activeTransition != nil || viewModel.isSaving)
+                }
+            }
+            .padding(16)
+            .background(Color.white)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.bpBorder))
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Status: \(title). \(actionTitle)")
+        }
+
+        private var confirmationTitle: String {
+            guard let confirmation else { return "Confirm change" }
+            return transitionActionTitle(confirmation) + "?"
+        }
+
+        private func transitionActionTitle(
+            _ transition: EditTripViewModel.TripStateTransition
+        ) -> String {
+            switch transition {
+            case .publishing: return "Publish trip"
+            case .movingToDraft: return "Move back to drafts"
+            case .makingPublic: return "Make public"
+            case .makingPrivate: return "Make private"
             }
         }
     }

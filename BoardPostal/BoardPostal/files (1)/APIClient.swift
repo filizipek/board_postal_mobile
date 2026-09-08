@@ -213,6 +213,10 @@ final class APIClient {
 
 // MARK: - Trip Entry helpers
 extension APIClient {
+    func updateTrip(id: String, body: UpdateTripRequest) async throws -> Trip {
+        try await request(.trip(id: id), method: .put, body: body)
+    }
+
     func submitTrip(tripId: String, message: String?) async throws -> SubmitTripResponse {
         try await request(
             .submitTrip(tripId: tripId),
