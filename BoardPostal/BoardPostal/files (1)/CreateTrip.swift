@@ -44,7 +44,6 @@ final class CreateTripViewModel: ObservableObject {
     @Published var isPlanning: Bool = false
     @Published var startDate: Date? = nil
     @Published var endDate: Date? = nil
-    @Published var visibility: String = "Private"
     @Published var destinations: [DraftDestination] = []
     @Published var newCity: String = ""
     @Published var newCountry: String = ""
@@ -59,9 +58,13 @@ final class CreateTripViewModel: ObservableObject {
     @Published var isUploadingCover: Bool = false
     @Published var coverUploadError: String? = nil
 
-    private let api = APIClient.shared
+    private let api: any CreateTripAPIProviding
 
     let totalSteps = 4
+
+    init(api: (any CreateTripAPIProviding)? = nil) {
+        self.api = api ?? APIClient.shared
+    }
 
     var progressFraction: Double {
         Double(currentStep + 1) / Double(totalSteps)
@@ -80,10 +83,12 @@ final class CreateTripViewModel: ObservableObject {
     }
 
     func nextStep() {
+        saveError = nil
         currentStep = min(currentStep + 1, totalSteps - 1)
     }
 
     func previousStep() {
+        saveError = nil
         currentStep = max(currentStep - 1, 0)
     }
 
@@ -130,8 +135,10 @@ final class CreateTripViewModel: ObservableObject {
     }
 
     func save() async {
+        guard !isSaving else { return }
         isSaving = true
         saveError = nil
+        defer { isSaving = false }
 
         do {
             let formatter = DateFormatter()
@@ -143,11 +150,11 @@ final class CreateTripViewModel: ObservableObject {
             // Step 1 — Create the trip (no isDraft/isPlanning on create DTO)
             let createBody = CreateTripRequest(
                 title: title,
-                visibility: visibility,
+                visibility: "private",
                 plannedStartDate: startStr,
                 plannedEndDate: endStr
             )
-            let created: Trip = try await api.request(.trips, method: .post, body: createBody)
+            let created = try await api.createTrip(body: createBody)
 
             // Step 2 — If isPlanning is set OR a cover is set, PUT to apply.
             if isPlanning || coverPhotoUrl != nil {
@@ -160,11 +167,7 @@ final class CreateTripViewModel: ObservableObject {
                     coverPhotoAttribution: coverPhotoAttribution,
                     coverPhotoAttributionUrl: coverPhotoAttributionUrl
                 )
-                _ = try? await api.request(
-                    .trip(id: created.id),
-                    method: .put,
-                    body: updateBody
-                ) as Trip
+                _ = try? await api.updateCreatedTrip(id: created.id, body: updateBody)
             }
 
             for (index, dest) in destinations.enumerated() {
@@ -173,11 +176,7 @@ final class CreateTripViewModel: ObservableObject {
                     country: dest.country,
                     orderIndex: index
                 )
-                let _: TripDestination = try await api.request(
-                    .destinations(tripId: created.id),
-                    method: .post,
-                    body: destBody
-                )
+                _ = try await api.addDestination(tripId: created.id, body: destBody)
             }
 
             createdTripId = created.id
@@ -185,7 +184,27 @@ final class CreateTripViewModel: ObservableObject {
             saveError = error.localizedDescription
         }
 
-        isSaving = false
+    }
+}
+
+@MainActor
+protocol CreateTripAPIProviding {
+    func createTrip(body: CreateTripRequest) async throws -> Trip
+    func updateCreatedTrip(id: String, body: UpdateTripRequest) async throws -> Trip
+    func addDestination(tripId: String, body: AddDestinationRequest) async throws -> TripDestination
+}
+
+extension APIClient: CreateTripAPIProviding {
+    func createTrip(body: CreateTripRequest) async throws -> Trip {
+        try await request(.trips, method: .post, body: body)
+    }
+
+    func updateCreatedTrip(id: String, body: UpdateTripRequest) async throws -> Trip {
+        try await request(.trip(id: id), method: .put, body: body)
+    }
+
+    func addDestination(tripId: String, body: AddDestinationRequest) async throws -> TripDestination {
+        try await request(.destinations(tripId: tripId), method: .post, body: body)
     }
 }
 
@@ -751,29 +770,18 @@ private struct StepCoverView: View {
 private struct StepStyleView: View {
     @ObservedObject var viewModel: CreateTripViewModel
 
-    private let visibilityOptions: [String] = ["Private", "Collaborative", "Public"]
-
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 32) {
-                // Visibility
                 VStack(alignment: .leading, spacing: 12) {
                     BPSectionHeader(title: "Who can see this trip?")
-
-                    VStack(spacing: 0) {
-                        ForEach(Array(visibilityOptions.enumerated()), id: \.element) { index, option in
-                            VisibilityRow(
-                                option: option,
-                                isSelected: viewModel.visibility == option
-                            ) {
-                                viewModel.visibility = option
-                            }
-
-                            if index < visibilityOptions.count - 1 {
-                                BPDivider()
-                            }
-                        }
-                    }
+                    Text("Trips start as private drafts. You can publish and share this trip later from Trip Settings.")
+                        .font(.bpBody)
+                        .foregroundColor(.bpTextSecondary)
+                        .padding(16)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
                 }
 
                 // Summary
@@ -800,7 +808,7 @@ private struct StepStyleView: View {
                                     viewModel.isPlanning ? "Planning" : "Documenting",
                                     color: viewModel.isPlanning ? .bpAzure : .bpSaffron
                                 )
-                                BPBadge(visibilityLabel(viewModel.visibility), color: .bpTextMuted)
+                                BPBadge("Private", color: .bpTextMuted)
                             }
                         }
                         .padding(16)
@@ -834,41 +842,6 @@ private struct StepStyleView: View {
     }
 }
 
-// MARK: - VisibilityRow
-
-private struct VisibilityRow: View {
-    let option: String
-    let isSelected: Bool
-    let onSelect: () -> Void
-
-    var body: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(visibilityLabel(option))
-                    .font(.bpBodyBold)
-                    .foregroundColor(.bpInk)
-
-                Text(visibilitySubtitle(option))
-                    .font(.bpCaption)
-                    .foregroundColor(.bpTextMuted)
-            }
-
-            Spacer()
-
-            if isSelected {
-                Image(systemName: "checkmark")
-                    .foregroundColor(.bpCobalt)
-                    .font(.callout)
-                    .fontWeight(.semibold)
-            }
-        }
-        .padding(.vertical, 14)
-        .padding(.horizontal, 16)
-        .background(isSelected ? Color.bpCobalt.opacity(0.04) : Color.white)
-        .onTapGesture { onSelect() }
-    }
-}
-
 // MARK: - Previews
 
 #Preview("Step 0 — Basics") {
@@ -894,6 +867,5 @@ private struct VisibilityRow: View {
         DraftDestination(city: "Istanbul", country: "Turkey"),
         DraftDestination(city: "Cappadocia", country: "Turkey")
     ]
-    vm.visibility = "Public"
     return CreateTripView(viewModel: vm)
 }

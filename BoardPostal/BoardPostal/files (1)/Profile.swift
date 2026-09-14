@@ -13,6 +13,7 @@ final class ProfileViewModel: ObservableObject {
     @Published var savedTripsTotal: Int = 0
     @Published var savedTripsCurrentPage: Int = 1
     @Published var isLoadingMoreSavedTrips: Bool = false
+    @Published var selectedSavedTrip: PublicTripCard? = nil
 
     // Following tab
     @Published var followingUsers: [FollowedUser] = []
@@ -117,6 +118,16 @@ final class ProfileViewModel: ObservableObject {
             // preserve current list; user can pull-to-refresh
         }
         isLoadingMoreSavedTrips = false
+    }
+
+    func selectSavedTrip(_ trip: PublicTripCard) {
+        selectedSavedTrip = trip
+    }
+
+    func applySavedState(_ isSaved: Bool, tripId: String) {
+        guard !isSaved else { return }
+        savedTrips.removeAll { $0.id == tripId }
+        savedTripsTotal = max(0, savedTripsTotal - 1)
     }
 
     func loadMoreFollowing() async {
@@ -230,6 +241,16 @@ struct ProfileView: View {
                 await viewModel.loadAll(
                     currentUserId: authStore.currentUser?.userId
                 )
+            }
+            .navigationDestination(
+                isPresented: Binding(
+                    get: { viewModel.selectedSavedTrip != nil },
+                    set: { if !$0 { viewModel.selectedSavedTrip = nil } }
+                )
+            ) {
+                if let trip = viewModel.selectedSavedTrip {
+                    ExplorePublicTripView(tripId: trip.id, preview: nil)
+                }
             }
             .sheet(isPresented: $isEditSheetPresented) {
                 EditProfileSheet(
@@ -496,7 +517,13 @@ struct ProfileView: View {
         } else {
             LazyVStack(spacing: 16) {
                 ForEach(Array(viewModel.savedTrips.enumerated()), id: \.element.id) { index, trip in
-                    PublicTripCardView(trip: trip)
+                    PublicTripCardView(
+                        trip: trip,
+                        onSelect: { viewModel.selectSavedTrip(trip) },
+                        onSavedChange: { isSaved in
+                            viewModel.applySavedState(isSaved, tripId: trip.id)
+                        }
+                    )
                         .onAppear {
                             if index == viewModel.savedTrips.count - 1,
                                viewModel.hasMoreSavedTrips,

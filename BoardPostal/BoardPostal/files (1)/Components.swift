@@ -504,6 +504,8 @@ struct SaveButton: View {
 // SaveButton, then title + destinations + author row.
 struct PublicTripCardView: View {
     let trip: PublicTripCard
+    var onSelect: (() -> Void)? = nil
+    var onSavedChange: ((Bool) -> Void)? = nil
 
     private var destinationLine: String {
         trip.destinations
@@ -551,10 +553,13 @@ struct PublicTripCardView: View {
                             }
                             .clipped()
                         )
+                        .contentShape(Rectangle())
+                        .onTapGesture { onSelect?() }
 
                     SaveButton(
                         tripId: trip.id,
-                        initialIsSaved: trip.isSaved
+                        initialIsSaved: trip.isSaved,
+                        onChange: onSavedChange
                     )
                     .padding(8)
                     .background(
@@ -581,6 +586,8 @@ struct PublicTripCardView: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.top, 12)
+                .contentShape(Rectangle())
+                .onTapGesture { onSelect?() }
 
                 // Author row — tappable, routes to the owner's PublicProfileView
                 NavigationLink {
@@ -612,6 +619,8 @@ struct PublicTripCardView: View {
                 .buttonStyle(.plain)
             }
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Open \(trip.title), \(trip.destinationSummary)")
     }
 }
 
