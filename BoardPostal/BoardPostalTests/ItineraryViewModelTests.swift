@@ -65,9 +65,36 @@ final class ItineraryViewModelTests: XCTestCase {
         )
 
         api.completeDayUpdate(with: .success(()))
-        await update.value
+        _ = await update.value
 
         XCTAssertEqual(viewModel.days[0].items.map(\.id), (day.items + [newerItem]).map(\.id))
+    }
+
+    func testDayUpdatePreventsOverlappingItemCreation() async throws {
+        let day: TripDay = try decodeFixture("itinerary-day")
+        let api = DelayedItineraryAPI()
+        let viewModel = ItineraryViewModel(tripId: "trip-1", days: [day], api: api)
+
+        let update = Task { await viewModel.updateDay(day, title: "Updated", date: nil) }
+        await api.waitForUpdateDayRequest()
+        let add = Task { await viewModel.addItem(
+            to: day,
+            type: "note",
+            title: "Must not overlap",
+            notes: nil,
+            time: nil
+        ) }
+        await api.allowScheduling()
+
+        XCTAssertEqual(api.createItemCallCount, 0)
+        if api.createItemCallCount > 0 {
+            let created: TripDayItem = try decodeFixture("itinerary-created-item-partial")
+            api.completeItemRequests(with: .success(created))
+        }
+        let addResult = await add.value
+        XCTAssertNotNil(addResult)
+        api.completeDayUpdate(with: .success(()))
+        _ = await update.value
     }
 
     func testSuccessfulCreationImmediatelyAddsVisibleItemAndEndsSaving() async throws {
@@ -175,17 +202,253 @@ final class ItineraryViewModelTests: XCTestCase {
         XCTAssertNotNil(failed.error)
     }
 
-    func testItemEditorSaveAndDeleteStatesAreMutuallyExclusive() {
-        var state = ItemEditorMutationState.idle
+    func testDoubleDeleteDayIssuesOneRequestAndRemovesOnce() async throws {
+        let day: TripDay = try decodeFixture("itinerary-day")
+        let api = DelayedItineraryAPI()
+        let viewModel = ItineraryViewModel(tripId: "trip-1", days: [day], api: api)
 
-        XCTAssertTrue(state.begin(.saving))
-        XCTAssertFalse(state.begin(.deleting))
-        XCTAssertEqual(state, .saving)
+        let first = Task { await viewModel.deleteDay(id: day.id) }
+        await api.waitForDeleteDayRequest()
+        let second = await viewModel.deleteDay(id: day.id)
 
-        state.finish()
-        XCTAssertTrue(state.begin(.deleting))
-        XCTAssertFalse(state.begin(.saving))
-        XCTAssertEqual(state, .deleting)
+        XCTAssertEqual(api.deleteDayCallCount, 1)
+        XCTAssertNotNil(second)
+        api.completeDayDelete(with: .success(()))
+        let firstResult = await first.value
+        XCTAssertNil(firstResult)
+        XCTAssertTrue(viewModel.days.isEmpty)
+    }
+
+    func testDoubleDeleteItemIssuesOneRequestAndRemovesOnlyMatchingItem() async throws {
+        let day: TripDay = try decodeFixture("itinerary-day")
+        let api = DelayedItineraryAPI()
+        let viewModel = ItineraryViewModel(tripId: "trip-1", days: [day], api: api)
+        let itemId = try XCTUnwrap(day.items.first?.id)
+
+        let first = Task { await viewModel.deleteItem(dayId: day.id, itemId: itemId) }
+        await api.waitForDeleteItemRequest()
+        let second = await viewModel.deleteItem(dayId: day.id, itemId: itemId)
+
+        XCTAssertEqual(api.deleteItemCallCount, 1)
+        XCTAssertNotNil(second)
+        api.completeItemDelete(with: .success(()))
+        let firstResult = await first.value
+        XCTAssertNil(firstResult)
+        XCTAssertFalse(viewModel.days[0].items.contains { $0.id == itemId })
+        XCTAssertEqual(viewModel.days[0].items.count, day.items.count - 1)
+    }
+
+    func testFailedDeleteAndReorderPreserveExactState() async throws {
+        let day: TripDay = try decodeFixture("itinerary-day")
+        let api = ItineraryAPIStub(
+            deleteItemResult: .failure(APIError.serverError(503)),
+            reorderItemResult: .failure(APIError.serverError(503))
+        )
+        let viewModel = ItineraryViewModel(tripId: "trip-1", days: [day], api: api)
+        let originalItems = itemSnapshot(day.items)
+        let originalIds = day.items.map(\.id)
+        let itemId = try XCTUnwrap(originalIds.first)
+
+        let deleteError = await viewModel.deleteItem(dayId: day.id, itemId: itemId)
+        XCTAssertNotNil(deleteError)
+        XCTAssertEqual(itemSnapshot(viewModel.days[0].items), originalItems)
+        let reorderError = await viewModel.reorderItems(
+            dayId: day.id, orderedIds: Array(originalIds.reversed()))
+        XCTAssertNotNil(reorderError)
+        XCTAssertEqual(itemSnapshot(viewModel.days[0].items), originalItems)
+        XCTAssertNil(viewModel.activeMutation)
+    }
+
+    func testUnknownItemIDIsForwardedForBackendAuthority() async throws {
+        let day: TripDay = try decodeFixture("itinerary-day")
+        let api = ItineraryAPIStub()
+        let viewModel = ItineraryViewModel(tripId: "trip-1", days: [day], api: api)
+        let itemId = try XCTUnwrap(day.items.first?.id)
+        let requested = ["40000000-0000-0000-0000-000000000999", itemId]
+
+        let error = await viewModel.reorderItems(
+            dayId: day.id, orderedIds: requested)
+
+        XCTAssertNil(error)
+        XCTAssertEqual(api.reorderItemCallCount, 1)
+        XCTAssertEqual(api.lastReorderItemIds, requested)
+        XCTAssertEqual(viewModel.days[0].items.first { $0.id == itemId }?.orderIndex, 1)
+    }
+
+    func testCancellationClearsMutationAndAllowsRetry() async throws {
+        let day: TripDay = try decodeFixture("itinerary-day")
+        let api = ItineraryAPIStub(
+            updateDayResult: .failure(CancellationError())
+        )
+        let viewModel = ItineraryViewModel(tripId: "trip-1", days: [day], api: api)
+
+        let cancellationError = await viewModel.updateDay(
+            day, title: "Cancelled", date: nil)
+        XCTAssertNotNil(cancellationError)
+        XCTAssertNil(viewModel.activeMutation)
+        XCTAssertEqual(viewModel.days[0].title, day.title)
+    }
+
+    func testSuccessfulItemUpdateReplacesOnlyMatchingCurrentItem() async throws {
+        let day: TripDay = try decodeFixture("itinerary-day")
+        let item = try XCTUnwrap(day.items.first)
+        let updated = TripDayItem(
+            id: item.id, tripDayId: item.tripDayId, type: item.type,
+            title: "Updated item", notes: item.notes, time: item.time,
+            orderIndex: item.orderIndex, placeId: item.placeId
+        )
+        let api = ItineraryAPIStub(updateItemResult: .success(updated))
+        let viewModel = ItineraryViewModel(tripId: "trip-1", days: [day], api: api)
+        let untouchedIds = Array(day.items.dropFirst().map(\.id))
+
+        let result = await viewModel.updateItem(
+            dayId: day.id, itemId: item.id, title: "Updated item",
+            type: item.type, notes: item.notes, time: item.time)
+
+        XCTAssertNil(result)
+        XCTAssertEqual(viewModel.days[0].items.first?.title, "Updated item")
+        XCTAssertEqual(Array(viewModel.days[0].items.dropFirst().map(\.id)), untouchedIds)
+    }
+
+    func testReorderCannotOverlapDayUpdate() async throws {
+        let day: TripDay = try decodeFixture("itinerary-day")
+        let api = DelayedItineraryAPI()
+        let viewModel = ItineraryViewModel(tripId: "trip-1", days: [day], api: api)
+
+        let update = Task { await viewModel.updateDay(day, title: "Updating", date: nil) }
+        await api.waitForUpdateDayRequest()
+        let reorderError = await viewModel.reorderItems(
+            dayId: day.id, orderedIds: day.items.map(\.id))
+
+        XCTAssertNotNil(reorderError)
+        XCTAssertEqual(api.reorderItemCallCount, 0)
+        api.completeDayUpdate(with: .success(()))
+        _ = await update.value
+    }
+
+    func testSuccessfulDayReorderUpdatesPersistedIndexesAndVisibleOrder() async throws {
+        let fixture: [TripDay] = try decodeFixture("itinerary-production-two-days")
+        let api = ItineraryAPIStub()
+        let viewModel = ItineraryViewModel(tripId: "trip-1", days: fixture, api: api)
+        let requested = fixture.map(\.id).reversed()
+
+        let error = await viewModel.reorderDays(Array(requested))
+
+        XCTAssertNil(error)
+        XCTAssertEqual(api.reorderDayCallCount, 1)
+        XCTAssertEqual(viewModel.sortedDays.map(\.id), Array(requested))
+        XCTAssertEqual(viewModel.sortedDays.map(\.orderIndex), [0, 1])
+        XCTAssertEqual(viewModel.sortedDays.map(\.dayNumber), [2, 1])
+    }
+
+    func testSuccessfulPartialItemReorderPreservesUnlistedIndexes() async throws {
+        let day: TripDay = try decodeFixture("itinerary-day")
+        let allItems: [TripDayItem] = try decodeFixture("itinerary-items")
+        let populatedDay = TripDay(
+            id: day.id, tripId: day.tripId, dayNumber: day.dayNumber,
+            title: day.title, date: day.date, orderIndex: day.orderIndex,
+            items: allItems)
+        let api = ItineraryAPIStub()
+        let viewModel = ItineraryViewModel(
+            tripId: "trip-1", days: [populatedDay], api: api)
+        let requested = [allItems[3].id, allItems[1].id]
+
+        let error = await viewModel.reorderItems(
+            dayId: day.id, orderedIds: requested)
+
+        XCTAssertNil(error)
+        XCTAssertEqual(api.reorderItemCallCount, 1)
+        XCTAssertEqual(api.lastReorderItemIds, requested)
+        XCTAssertEqual(viewModel.days[0].items.first { $0.id == allItems[3].id }?.orderIndex, 0)
+        XCTAssertEqual(viewModel.days[0].items.first { $0.id == allItems[1].id }?.orderIndex, 1)
+        XCTAssertEqual(viewModel.days[0].items.first { $0.id == allItems[0].id }?.orderIndex, 0)
+        XCTAssertEqual(viewModel.days[0].items.first { $0.id == allItems[2].id }?.orderIndex, 2)
+        XCTAssertEqual(visibleItemIds(viewModel.days[0]), [allItems[0].id, allItems[3].id, allItems[1].id, allItems[2].id])
+    }
+
+    func testDuplicateItemIDsUseLastBackendPosition() async throws {
+        let day: TripDay = try decodeFixture("itinerary-day")
+        let allItems: [TripDayItem] = try decodeFixture("itinerary-items")
+        let populatedDay = TripDay(
+            id: day.id, tripId: day.tripId, dayNumber: day.dayNumber,
+            title: day.title, date: day.date, orderIndex: day.orderIndex,
+            items: allItems)
+        let api = ItineraryAPIStub()
+        let viewModel = ItineraryViewModel(
+            tripId: "trip-1", days: [populatedDay], api: api)
+        let requested = [allItems[3].id, allItems[1].id, allItems[3].id]
+
+        let error = await viewModel.reorderItems(
+            dayId: day.id, orderedIds: requested)
+
+        XCTAssertNil(error)
+        XCTAssertEqual(api.reorderItemCallCount, 1)
+        XCTAssertEqual(api.lastReorderItemIds, requested)
+        XCTAssertEqual(viewModel.days[0].items.first { $0.id == allItems[3].id }?.orderIndex, 2)
+        XCTAssertEqual(viewModel.days[0].items.first { $0.id == allItems[1].id }?.orderIndex, 1)
+    }
+
+    func testEmptyReorderIsRejectedBeforeRequest() async throws {
+        let day: TripDay = try decodeFixture("itinerary-day")
+        let api = ItineraryAPIStub()
+        let viewModel = ItineraryViewModel(tripId: "trip-1", days: [day], api: api)
+
+        let dayError = await viewModel.reorderDays([])
+        let itemError = await viewModel.reorderItems(
+            dayId: day.id, orderedIds: [])
+        XCTAssertNotNil(dayError)
+        XCTAssertNotNil(itemError)
+        XCTAssertEqual(api.reorderDayCallCount, 0)
+        XCTAssertEqual(api.reorderItemCallCount, 0)
+    }
+
+    func testDuplicateDayIDsUseLastBackendPosition() async throws {
+        let fixture: [TripDay] = try decodeFixture("itinerary-production-two-days")
+        let api = ItineraryAPIStub()
+        let viewModel = ItineraryViewModel(tripId: "trip-1", days: fixture, api: api)
+        let repeatedId = fixture[1].id
+
+        let error = await viewModel.reorderDays([repeatedId, repeatedId])
+
+        XCTAssertNil(error)
+        XCTAssertEqual(api.reorderDayCallCount, 1)
+        XCTAssertEqual(api.lastReorderDayIds, [repeatedId, repeatedId])
+        XCTAssertEqual(viewModel.days.first { $0.id == repeatedId }?.orderIndex, 1)
+        XCTAssertEqual(viewModel.days.first { $0.id == fixture[0].id }?.orderIndex, 0)
+    }
+
+    func testFailedDayReorderPreservesExactState() async throws {
+        let fixture: [TripDay] = try decodeFixture("itinerary-production-two-days")
+        let api = ItineraryAPIStub(
+            reorderDayResult: .failure(APIError.serverError(503)))
+        let viewModel = ItineraryViewModel(tripId: "trip-1", days: fixture, api: api)
+        let original = viewModel.days.map { ($0.id, $0.dayNumber, $0.orderIndex) }
+
+        let error = await viewModel.reorderDays(Array(fixture.map(\.id).reversed()))
+
+        XCTAssertNotNil(error)
+        XCTAssertEqual(
+            viewModel.days.map { "\($0.id)|\($0.dayNumber)|\($0.orderIndex)" },
+            original.map { "\($0.0)|\($0.1)|\($0.2)" })
+        XCTAssertNil(viewModel.activeMutation)
+    }
+
+    private func visibleItemIds(_ day: TripDay) -> [String] {
+        day.items.enumerated().sorted {
+            if $0.element.orderIndex != $1.element.orderIndex {
+                return $0.element.orderIndex < $1.element.orderIndex
+            }
+            return $0.offset < $1.offset
+        }.map(\.element.id)
+    }
+
+    private func itemSnapshot(_ items: [TripDayItem]) -> [String] {
+        items.map {
+            [$0.id, $0.tripDayId, $0.type, $0.title, $0.notes, $0.time,
+             String($0.orderIndex), $0.placeId]
+                .map { $0 ?? "<nil>" }
+                .joined(separator: "|")
+        }
     }
 
     private func decodeFixture<T: Decodable>(_ name: String) throws -> T {
@@ -201,6 +464,28 @@ private final class DelayedItineraryAPI: ItineraryAPIProviding {
     private var dayContinuations: [CheckedContinuation<TripDay, Error>] = []
     private var itemContinuations: [CheckedContinuation<TripDayItem, Error>] = []
     private var updateDayContinuation: CheckedContinuation<Void, Error>?
+    private var deleteDayContinuation: CheckedContinuation<Void, Error>?
+    private var deleteItemContinuation: CheckedContinuation<Void, Error>?
+    private(set) var deleteDayCallCount = 0
+    private(set) var deleteItemCallCount = 0
+    private(set) var reorderItemCallCount = 0
+    private(set) var reorderDayCallCount = 0
+
+    func updateDayItem(tripId: String, dayId: String, item: TripDayItem, title: String, type: String, notes: String?, time: String?) async throws -> TripDayItem { item }
+    func deleteDay(tripId: String, dayId: String) async throws {
+        deleteDayCallCount += 1
+        try await withCheckedThrowingContinuation { deleteDayContinuation = $0 }
+    }
+    func deleteDayItem(tripId: String, dayId: String, itemId: String) async throws {
+        deleteItemCallCount += 1
+        try await withCheckedThrowingContinuation { deleteItemContinuation = $0 }
+    }
+    func reorderDays(tripId: String, orderedIds: [String]) async throws {
+        reorderDayCallCount += 1
+    }
+    func reorderDayItems(tripId: String, dayId: String, orderedIds: [String]) async throws {
+        reorderItemCallCount += 1
+    }
 
     func createDay(tripId: String, body: CreateDayRequest) async throws -> TripDay {
         createDayCallCount += 1
@@ -228,6 +513,14 @@ private final class DelayedItineraryAPI: ItineraryAPIProviding {
         while updateDayContinuation == nil { await Task.yield() }
     }
 
+    func waitForDeleteDayRequest() async {
+        while deleteDayContinuation == nil { await Task.yield() }
+    }
+
+    func waitForDeleteItemRequest() async {
+        while deleteItemContinuation == nil { await Task.yield() }
+    }
+
     func allowScheduling() async {
         for _ in 0..<10 { await Task.yield() }
     }
@@ -248,6 +541,16 @@ private final class DelayedItineraryAPI: ItineraryAPIProviding {
         updateDayContinuation?.resume(with: result)
         updateDayContinuation = nil
     }
+
+    func completeDayDelete(with result: Result<Void, Error>) {
+        deleteDayContinuation?.resume(with: result)
+        deleteDayContinuation = nil
+    }
+
+    func completeItemDelete(with result: Result<Void, Error>) {
+        deleteItemContinuation?.resume(with: result)
+        deleteItemContinuation = nil
+    }
 }
 
 @MainActor
@@ -255,15 +558,31 @@ private final class ItineraryAPIStub: ItineraryAPIProviding {
     let createDayResult: Result<TripDay, Error>
     let updateDayResult: Result<Void, Error>
     let createItemResult: Result<TripDayItem, Error>
+    let deleteItemResult: Result<Void, Error>
+    let reorderItemResult: Result<Void, Error>
+    let updateItemResult: Result<TripDayItem, Error>?
+    let reorderDayResult: Result<Void, Error>
+    private(set) var reorderDayCallCount = 0
+    private(set) var reorderItemCallCount = 0
+    private(set) var lastReorderDayIds: [String]?
+    private(set) var lastReorderItemIds: [String]?
 
     init(
         createDayResult: Result<TripDay, Error> = .failure(APIError.serverError(500)),
         updateDayResult: Result<Void, Error> = .success(()),
-        createItemResult: Result<TripDayItem, Error> = .failure(APIError.serverError(500))
+        createItemResult: Result<TripDayItem, Error> = .failure(APIError.serverError(500)),
+        deleteItemResult: Result<Void, Error> = .success(()),
+        reorderItemResult: Result<Void, Error> = .success(()),
+        updateItemResult: Result<TripDayItem, Error>? = nil,
+        reorderDayResult: Result<Void, Error> = .success(())
     ) {
         self.createDayResult = createDayResult
         self.updateDayResult = updateDayResult
         self.createItemResult = createItemResult
+        self.deleteItemResult = deleteItemResult
+        self.reorderItemResult = reorderItemResult
+        self.updateItemResult = updateItemResult
+        self.reorderDayResult = reorderDayResult
     }
 
     func createDay(tripId: String, body: CreateDayRequest) async throws -> TripDay {
@@ -276,5 +595,21 @@ private final class ItineraryAPIStub: ItineraryAPIProviding {
 
     func createDayItem(tripId: String, dayId: String, body: CreateDayItemRequest) async throws -> TripDayItem {
         try createItemResult.get()
+    }
+
+    func updateDayItem(tripId: String, dayId: String, item: TripDayItem, title: String, type: String, notes: String?, time: String?) async throws -> TripDayItem {
+        try updateItemResult?.get() ?? item
+    }
+    func deleteDay(tripId: String, dayId: String) async throws {}
+    func deleteDayItem(tripId: String, dayId: String, itemId: String) async throws { try deleteItemResult.get() }
+    func reorderDays(tripId: String, orderedIds: [String]) async throws {
+        reorderDayCallCount += 1
+        lastReorderDayIds = orderedIds
+        try reorderDayResult.get()
+    }
+    func reorderDayItems(tripId: String, dayId: String, orderedIds: [String]) async throws {
+        reorderItemCallCount += 1
+        lastReorderItemIds = orderedIds
+        try reorderItemResult.get()
     }
 }

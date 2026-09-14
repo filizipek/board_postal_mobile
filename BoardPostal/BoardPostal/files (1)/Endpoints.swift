@@ -39,8 +39,10 @@ enum APIEndpoint {
     // MARK: - Days (planning)
     case days(tripId: String)
     case day(tripId: String, dayId: String)
+    case reorderDays(tripId: String)
     case dayItems(tripId: String, dayId: String)
     case dayItem(tripId: String, dayId: String, itemId: String)
+    case reorderDayItems(tripId: String, dayId: String)
 
     // MARK: - Collaborators
     case collaborators(tripId: String)
@@ -105,8 +107,10 @@ enum APIEndpoint {
 
         case .days(let tripId):              return "/api/trips/\(tripId)/days"
         case .day(let t, let d):             return "/api/trips/\(t)/days/\(d)"
+        case .reorderDays(let t):            return "/api/trips/\(t)/days/reorder"
         case .dayItems(let t, let d):        return "/api/trips/\(t)/days/\(d)/items"
         case .dayItem(let t, let d, let i):  return "/api/trips/\(t)/days/\(d)/items/\(i)"
+        case .reorderDayItems(let t, let d): return "/api/trips/\(t)/days/\(d)/items/reorder"
 
         case .collaborators(let tripId):     return "/api/trips/\(tripId)/collaborators"
         case .collaborator(let t, let c):    return "/api/trips/\(t)/collaborators/\(c)"
