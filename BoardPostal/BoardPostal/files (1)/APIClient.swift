@@ -1,4 +1,46 @@
 import Foundation
+import OSLog
+
+enum DecodingDiagnostics {
+    static func sanitizedDescription<T>(for error: Error, model: T.Type) -> String {
+        let modelName = String(reflecting: model)
+        guard let decodingError = error as? DecodingError else {
+            return "Model: \(modelName). Error: non-Codable decoding failure."
+        }
+
+        let kind: String
+        let path: [CodingKey]
+        switch decodingError {
+        case .keyNotFound(let key, let context):
+            kind = "missing key \(key.stringValue)"
+            path = context.codingPath + [key]
+        case .valueNotFound(let type, let context):
+            kind = "missing/null value for \(String(reflecting: type))"
+            path = context.codingPath
+        case .typeMismatch(let type, let context):
+            kind = "type mismatch for \(String(reflecting: type))"
+            path = context.codingPath
+        case .dataCorrupted(let context):
+            kind = "corrupt value"
+            path = context.codingPath
+        @unknown default:
+            kind = "unknown Codable failure"
+            path = []
+        }
+        return "Model: \(modelName). Path: \(codingPath(path)). Error: \(kind)."
+    }
+
+    private static func codingPath(_ keys: [CodingKey]) -> String {
+        guard !keys.isEmpty else { return "<root>" }
+        return keys.reduce(into: "") { result, key in
+            if let index = key.intValue {
+                result += "[\(index)]"
+            } else {
+                result += result.isEmpty ? key.stringValue : ".\(key.stringValue)"
+            }
+        }
+    }
+}
 
 // MARK: - APIClient
 // URLSession-based HTTP client that mirrors the Axios JWT interceptor behaviour:
@@ -186,7 +228,10 @@ final class APIClient {
         do {
             return try JSONDecoder.bpDecoder.decode(type, from: data)
         } catch {
-            throw APIError.decodingError(error.localizedDescription)
+            let diagnostic = DecodingDiagnostics.sanitizedDescription(for: error, model: type)
+            Logger(subsystem: "com.boardpostal.ios", category: "decoding")
+                .error("\(diagnostic, privacy: .public)")
+            throw APIError.decodingError(diagnostic)
         }
     }
 
@@ -330,7 +375,7 @@ enum APIError: LocalizedError {
         case .conflict(let msg):    return msg
         case .validationError(let msg): return msg
         case .serverError(let code): return "Server error (\(code)). Please try again."
-        case .decodingError(let msg): return "Data error: \(msg)"
+        case .decodingError:          return "We couldn't load this data. Please try again."
         case .unknown(let code):    return "Unexpected error (\(code))."
         }
     }
