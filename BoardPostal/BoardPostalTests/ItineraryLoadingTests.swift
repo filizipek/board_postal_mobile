@@ -56,6 +56,77 @@ final class ItineraryLoadingTests: XCTestCase {
         XCTAssertEqual(viewModel.itineraryLoadState, .loaded)
         XCTAssertTrue(viewModel.days.isEmpty)
     }
+
+    func testBackgroundedCompletionDoesNotPublishAndActiveRetrySucceeds() async throws {
+        let expected: [TripDay] = try decodeLoadingFixture("itinerary-production-two-days")
+        let loader = ControlledDaysLoader(nextResult: .success(expected))
+        let viewModel = TripDetailViewModel(
+            trip: makeLoadingTrip(),
+            submissionAPI: LoadingSubmissionStub(),
+            itineraryAPI: loader
+        )
+
+        let firstLoad = Task { await viewModel.loadItinerary() }
+        await loader.waitForRequest()
+        viewModel.updateSceneActivity(.background)
+        loader.completeRequest()
+        await firstLoad.value
+
+        XCTAssertTrue(viewModel.days.isEmpty)
+        XCTAssertEqual(viewModel.itineraryLoadRevision, 0)
+
+        viewModel.updateSceneActivity(.active)
+        await viewModel.loadItinerary()
+
+        XCTAssertEqual(viewModel.days.map(\.id), expected.map(\.id))
+        XCTAssertEqual(viewModel.itineraryLoadState, .loaded)
+        XCTAssertEqual(loader.callCount, 2)
+    }
+
+    func testInactiveAndBackgroundPhasesDoNotStartItineraryWork() async {
+        let loader = SequencedDaysLoader(results: [.success([])])
+        let viewModel = TripDetailViewModel(
+            trip: makeLoadingTrip(),
+            submissionAPI: LoadingSubmissionStub(),
+            itineraryAPI: loader
+        )
+
+        viewModel.updateSceneActivity(.inactive)
+        await viewModel.loadItinerary()
+        viewModel.updateSceneActivity(.background)
+        await viewModel.loadItinerary()
+
+        XCTAssertEqual(loader.callCount, 0)
+        XCTAssertEqual(viewModel.itineraryLoadRevision, 0)
+    }
+}
+
+@MainActor
+private final class ControlledDaysLoader: ItineraryDaysLoading {
+    private let nextResult: Result<[TripDay], Error>
+    private var continuation: CheckedContinuation<Void, Never>?
+    private(set) var callCount = 0
+
+    init(nextResult: Result<[TripDay], Error>) {
+        self.nextResult = nextResult
+    }
+
+    func loadDays(tripId: String) async throws -> [TripDay] {
+        callCount += 1
+        if callCount == 1 {
+            await withCheckedContinuation { continuation = $0 }
+        }
+        return try nextResult.get()
+    }
+
+    func waitForRequest() async {
+        while callCount == 0 { await Task.yield() }
+    }
+
+    func completeRequest() {
+        continuation?.resume()
+        continuation = nil
+    }
 }
 
 @MainActor

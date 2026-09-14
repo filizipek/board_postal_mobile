@@ -532,6 +532,12 @@ enum ItineraryLoadState: Equatable {
     case failed
 }
 
+enum TripDetailSceneActivity: Equatable {
+    case active
+    case inactive
+    case background
+}
+
 @MainActor
 protocol ItineraryDaysLoading {
     func loadDays(tripId: String) async throws -> [TripDay]
@@ -560,6 +566,11 @@ final class TripDetailViewModel: ObservableObject {
     private let api: APIClient
     private let submissionAPI: any SubmissionAPIProviding
     private let itineraryAPI: any ItineraryDaysLoading
+    private var sceneActivity: TripDetailSceneActivity = .active
+
+    private var canPublishSceneUpdates: Bool {
+        sceneActivity == .active && !Task.isCancelled
+    }
 
     init(trip: Trip) {
         self.trip = trip
@@ -587,6 +598,7 @@ final class TripDetailViewModel: ObservableObject {
     }
 
     func loadAll() async {
+        guard canPublishSceneUpdates else { return }
         isLoading = true
         error = nil
 
@@ -597,6 +609,7 @@ final class TripDetailViewModel: ObservableObject {
                     let result: [TripEntry] = try await
                         self.api.request(.entries(tripId: self.trip.id))
                     await MainActor.run {
+                        guard self.canPublishSceneUpdates else { return }
                         self.entries = result
                     }
                 } catch {}
@@ -608,6 +621,7 @@ final class TripDetailViewModel: ObservableObject {
                     let result: [TripPlace] = try await
                         self.api.request(.tripPlaces(tripId: self.trip.id))
                     await MainActor.run {
+                        guard self.canPublishSceneUpdates else { return }
                         self.places = result
                     }
                 } catch {}
@@ -622,6 +636,7 @@ final class TripDetailViewModel: ObservableObject {
                 let result: [TripMediaAsset] =
                     (try? await self.api.request(.tripMedia(tripId: self.trip.id))) ?? []
                 await MainActor.run {
+                    guard self.canPublishSceneUpdates else { return }
                     self.mediaAssets = result
                 }
             }
@@ -631,25 +646,35 @@ final class TripDetailViewModel: ObservableObject {
                 let result: TripSubmission? =
                     try? await self.api.request(.tripSubmission(tripId: self.trip.id))
                 await MainActor.run {
+                    guard self.canPublishSceneUpdates else { return }
                     self.submission = result
                 }
             }
         }
 
         await MainActor.run {
+            guard self.canPublishSceneUpdates else { return }
             self.isLoading = false
         }
     }
 
     func loadItinerary() async {
+        guard canPublishSceneUpdates else { return }
         itineraryLoadState = .loading
         do {
-            days = try await itineraryAPI.loadDays(tripId: trip.id)
+            let loadedDays = try await itineraryAPI.loadDays(tripId: trip.id)
+            guard canPublishSceneUpdates else { return }
+            days = loadedDays
             itineraryLoadRevision += 1
             itineraryLoadState = .loaded
         } catch {
+            guard canPublishSceneUpdates else { return }
             itineraryLoadState = .failed
         }
+    }
+
+    func updateSceneActivity(_ activity: TripDetailSceneActivity) {
+        sceneActivity = activity
     }
 
     func removeEntry(id: String) {
@@ -714,6 +739,7 @@ extension APIClient: ItineraryAPIProviding {}
 struct TripDetailView: View {
     @StateObject private var viewModel: TripDetailViewModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
     @State private var selectedTab = 0
     @State private var showAddEntry = false
     @State private var showAddPhoto = false
@@ -913,7 +939,10 @@ struct TripDetailView: View {
         }
         .presentationDetents([.medium, .large])
         .bpToast($toast)
-        .task {
+        .task(id: scenePhase) {
+            let activity = TripDetailSceneActivity(scenePhase)
+            viewModel.updateSceneActivity(activity)
+            guard activity == .active else { return }
             await viewModel.loadAll()
         }
     }
@@ -1386,6 +1415,17 @@ struct TripDetailView: View {
             PhotosTabView(assets: viewModel.mediaAssets, isLoading: viewModel.isLoading)
         default:
             EmptyView()
+        }
+    }
+}
+
+private extension TripDetailSceneActivity {
+    init(_ scenePhase: ScenePhase) {
+        switch scenePhase {
+        case .active: self = .active
+        case .inactive: self = .inactive
+        case .background: self = .background
+        @unknown default: self = .inactive
         }
     }
 }
