@@ -342,20 +342,18 @@ extension APIClient {
         dayId: String,
         item: TripDayItem,
         title: String,
-        type: String,
         notes: String?,
         time: String?
     ) async throws -> TripDayItem {
         struct Body: Encodable {
             let title: String
-            let type: String
             let notes: String?
             let time: String?
         }
         try await requestVoid(
             .dayItem(tripId: tripId, dayId: dayId, itemId: item.id),
             method: .put,
-            body: Body(title: title, type: type, notes: notes, time: time)
+            body: Body(title: title, notes: notes, time: time)
         )
         return TripDayItem(
             id: item.id,
