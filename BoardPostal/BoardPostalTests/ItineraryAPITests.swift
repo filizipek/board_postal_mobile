@@ -35,7 +35,6 @@ final class ItineraryAPITests: XCTestCase {
             dayId: "30000000-0000-0000-0000-000000000001",
             item: original,
             title: "Metro to the hotel",
-            type: original.type,
             notes: "Use the airport line",
             time: "10:30"
         )
@@ -46,6 +45,41 @@ final class ItineraryAPITests: XCTestCase {
         XCTAssertEqual(updated.time, "10:30")
         XCTAssertEqual(updated.type, original.type)
         XCTAssertEqual(updated.orderIndex, original.orderIndex)
+    }
+
+    func testItemCreationStillSendsSelectedType() async throws {
+        do {
+            let _: TripDayItem = try await api.createDayItem(
+                tripId: "10000000-0000-0000-0000-000000000001",
+                dayId: "30000000-0000-0000-0000-000000000001",
+                body: CreateDayItemRequest(
+                    type: "transport", title: "Train", notes: nil,
+                    time: "08:30", orderIndex: 2, placeId: nil))
+            XCTFail("Expected stubbed validation response")
+        } catch {}
+
+        let request = try XCTUnwrap(ItineraryURLProtocolStub.requests.only)
+        let body = try decodedBody(request)
+        XCTAssertEqual(body["type"] as? String, "transport")
+    }
+
+    func testItemUpdateBodyContainsOnlyBackendSupportedFields() async throws {
+        let items: [TripDayItem] = try decodeFixture("itinerary-items")
+        let original = items[1]
+
+        _ = try await api.updateDayItem(
+            tripId: "10000000-0000-0000-0000-000000000001",
+            dayId: "30000000-0000-0000-0000-000000000001",
+            item: original,
+            title: "Updated title",
+            notes: "Updated notes",
+            time: "11:45")
+
+        let request = try XCTUnwrap(ItineraryURLProtocolStub.requests.only)
+        XCTAssertEqual(request.httpMethod, "PUT")
+        XCTAssertEqual(
+            Set(try decodedBody(request).keys),
+            Set(["title", "notes", "time"]))
     }
 
     func testNonSuccessUpdateRemainsAnError() async throws {
@@ -113,10 +147,14 @@ final class ItineraryAPITests: XCTestCase {
     }
 
     private func decodedOrderedIds(_ request: URLRequest) throws -> [String] {
-        let body = try XCTUnwrap(request.httpBody)
-        let object = try XCTUnwrap(
-            JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let object = try decodedBody(request)
         return try XCTUnwrap(object["orderedIds"] as? [String])
+    }
+
+    private func decodedBody(_ request: URLRequest) throws -> [String: Any] {
+        let body = try XCTUnwrap(request.httpBody)
+        return try XCTUnwrap(
+            JSONSerialization.jsonObject(with: body) as? [String: Any])
     }
 
     private func fixtureData(_ name: String) throws -> Data {
@@ -187,6 +225,7 @@ private final class ItineraryURLProtocolStub: URLProtocol {
         }
         return (204, Data())
     }
+
 }
 
 private extension Array {

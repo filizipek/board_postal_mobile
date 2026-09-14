@@ -732,7 +732,7 @@ protocol ItineraryAPIProviding {
     func createDay(tripId: String, body: CreateDayRequest) async throws -> TripDay
     func updateDay(tripId: String, dayId: String, body: UpdateDayRequest) async throws
     func createDayItem(tripId: String, dayId: String, body: CreateDayItemRequest) async throws -> TripDayItem
-    func updateDayItem(tripId: String, dayId: String, item: TripDayItem, title: String, type: String, notes: String?, time: String?) async throws -> TripDayItem
+    func updateDayItem(tripId: String, dayId: String, item: TripDayItem, title: String, notes: String?, time: String?) async throws -> TripDayItem
     func deleteDay(tripId: String, dayId: String) async throws
     func deleteDayItem(tripId: String, dayId: String, itemId: String) async throws
     func reorderDays(tripId: String, orderedIds: [String]) async throws
@@ -2054,7 +2054,6 @@ struct EntryDetailView: View {
             dayId: String,
             itemId: String,
             title: String,
-            type: String,
             notes: String?,
             time: String?
         ) async -> String? {
@@ -2066,7 +2065,7 @@ struct EntryDetailView: View {
             do {
                 let updated = try await api.updateDayItem(
                     tripId: tripId, dayId: dayId, item: item,
-                    title: title, type: type, notes: notes, time: time
+                    title: title, notes: notes, time: time
                 )
                 guard let dayIndex = days.firstIndex(where: { $0.id == dayId }),
                       let itemIndex = days[dayIndex].items.firstIndex(where: { $0.id == itemId }) else {
@@ -2988,18 +2987,10 @@ struct EntryDetailView: View {
         @Environment(\.dismiss) private var dismiss
 
         @State private var title: String
-        @State private var selectedType: String
         @State private var notes: String
         @State private var time: String
         @State private var saveError: String? = nil
         @State private var showDeleteConfirm = false
-
-        private let types = [
-            ("place", "mappin", "Place"),
-            ("transport", "airplane", "Transport"),
-            ("accommodation", "bed.double", "Hotel"),
-            ("note", "note.text", "Note")
-        ]
 
         init(
             dayId: String,
@@ -3010,7 +3001,6 @@ struct EntryDetailView: View {
             self.item = item
             self.viewModel = viewModel
             _title = State(initialValue: item.title ?? "")
-            _selectedType = State(initialValue: item.type)
             _notes = State(initialValue: item.notes ?? "")
             _time = State(initialValue: item.time ?? "")
         }
@@ -3021,7 +3011,6 @@ struct EntryDetailView: View {
 
         private var hasChanges: Bool {
             title != (item.title ?? "")
-                || selectedType != item.type
                 || notes != (item.notes ?? "")
                 || time != (item.time ?? "")
         }
@@ -3033,45 +3022,23 @@ struct EntryDetailView: View {
         var body: some View {
             NavigationStack {
                 VStack(spacing: 0) {
-                    HStack(spacing: 8) {
-                        ForEach(types, id: \.0) {
-                            type, icon, label in
-                            Button {
-                                selectedType = type
-                            } label: {
-                                VStack(spacing: 6) {
-                                    Image(systemName: icon)
-                                        .font(.system(
-                                            size: 18))
-                                    Text(label)
-                                        .font(.bpCaption)
-                                }
-                                .foregroundColor(
-                                    selectedType == type
-                                    ? .bpCobalt : .bpStone)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 12)
-                                .background(
-                                    selectedType == type
-                                    ? Color.bpCobalt
-                                        .opacity(0.08)
-                                    : Color.clear)
-                                .clipShape(
-                                    RoundedRectangle(
-                                        cornerRadius: 10))
-                                .overlay(
-                                    RoundedRectangle(
-                                        cornerRadius: 10)
-                                    .stroke(
-                                        selectedType == type
-                                        ? Color.bpCobalt
-                                        : Color.bpBorder,
-                                        lineWidth:
-                                        selectedType == type
-                                        ? 1.5 : 1))
-                            }
-                            .buttonStyle(.plain)
+                    HStack(spacing: 12) {
+                        Image(systemName: item.itemType.icon)
+                            .font(.system(size: 18))
+                            .foregroundColor(.bpCobalt)
+                            .frame(width: 36, height: 36)
+                            .background(Color.bpCobalt.opacity(0.08))
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("ITEM TYPE")
+                                .font(.bpLabel)
+                                .foregroundColor(.bpTextMuted)
+                                .tracking(1.0)
+                            Text(itemTypeLabel)
+                                .font(.bpBodyBold)
+                                .foregroundColor(.bpInk)
                         }
+                        Spacer()
                     }
                     .padding(16)
 
@@ -3212,7 +3179,6 @@ struct EntryDetailView: View {
                 dayId: dayId,
                 itemId: item.id,
                 title: trimmedTitle,
-                type: selectedType,
                 notes: notes.isEmpty ? nil : notes,
                 time: time.isEmpty ? nil : time
             )
@@ -3233,11 +3199,20 @@ struct EntryDetailView: View {
         }
 
         private var titlePlaceholder: String {
-            switch selectedType {
-            case "place": return "e.g. Sagrada Família"
-            case "transport": return "e.g. Train to Barcelona"
-            case "accommodation": return "e.g. Hotel Arts"
-            default: return "e.g. Pack sunscreen"
+            switch item.itemType {
+            case .place: return "e.g. Sagrada Família"
+            case .transport: return "e.g. Train to Barcelona"
+            case .accommodation: return "e.g. Hotel Arts"
+            case .note: return "e.g. Pack sunscreen"
+            }
+        }
+
+        private var itemTypeLabel: String {
+            switch item.itemType {
+            case .place: return "Place"
+            case .transport: return "Transport"
+            case .accommodation: return "Hotel"
+            case .note: return "Note"
             }
         }
     }
