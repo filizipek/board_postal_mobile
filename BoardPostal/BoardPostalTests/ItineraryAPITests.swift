@@ -7,6 +7,7 @@ final class ItineraryAPITests: XCTestCase {
 
     override func setUp() {
         super.setUp()
+        ItineraryURLProtocolStub.requests = []
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [ItineraryURLProtocolStub.self]
         api = APIClient(session: URLSession(configuration: configuration))
@@ -77,6 +78,47 @@ final class ItineraryAPITests: XCTestCase {
         }
     }
 
+    func testDayReorderSendsExactPutRouteAndBodyOnce() async throws {
+        let tripId = "10000000-0000-0000-0000-000000000001"
+        let orderedIds = [
+            "30000000-0000-0000-0000-000000000002",
+            "30000000-0000-0000-0000-000000000001"
+        ]
+
+        try await api.reorderDays(tripId: tripId, orderedIds: orderedIds)
+
+        let request = try XCTUnwrap(ItineraryURLProtocolStub.requests.only)
+        XCTAssertEqual(request.httpMethod, "PUT")
+        XCTAssertEqual(request.url?.path, "/api/trips/\(tripId)/days/reorder")
+        XCTAssertEqual(try decodedOrderedIds(request), orderedIds)
+    }
+
+    func testItemReorderSendsExactPutRouteAndBodyOnce() async throws {
+        let tripId = "10000000-0000-0000-0000-000000000001"
+        let dayId = "30000000-0000-0000-0000-000000000001"
+        let orderedIds = [
+            "40000000-0000-0000-0000-000000000002",
+            "40000000-0000-0000-0000-000000000001"
+        ]
+
+        try await api.reorderDayItems(
+            tripId: tripId, dayId: dayId, orderedIds: orderedIds)
+
+        let request = try XCTUnwrap(ItineraryURLProtocolStub.requests.only)
+        XCTAssertEqual(request.httpMethod, "PUT")
+        XCTAssertEqual(
+            request.url?.path,
+            "/api/trips/\(tripId)/days/\(dayId)/items/reorder")
+        XCTAssertEqual(try decodedOrderedIds(request), orderedIds)
+    }
+
+    private func decodedOrderedIds(_ request: URLRequest) throws -> [String] {
+        let body = try XCTUnwrap(request.httpBody)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: body) as? [String: Any])
+        return try XCTUnwrap(object["orderedIds"] as? [String])
+    }
+
     private func fixtureData(_ name: String) throws -> Data {
         let url = try XCTUnwrap(Bundle(for: Self.self).url(forResource: name, withExtension: "json"))
         return try Data(contentsOf: url)
@@ -88,11 +130,27 @@ final class ItineraryAPITests: XCTestCase {
 }
 
 private final class ItineraryURLProtocolStub: URLProtocol {
+    static var requests: [URLRequest] = []
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
         do {
+            var recordedRequest = request
+            if recordedRequest.httpBody == nil,
+               let stream = recordedRequest.httpBodyStream {
+                stream.open()
+                defer { stream.close() }
+                var body = Data()
+                var buffer = [UInt8](repeating: 0, count: 1_024)
+                while stream.hasBytesAvailable {
+                    let count = stream.read(&buffer, maxLength: buffer.count)
+                    guard count > 0 else { break }
+                    body.append(buffer, count: count)
+                }
+                recordedRequest.httpBody = body
+            }
+            Self.requests.append(recordedRequest)
             let (status, data) = response(for: request)
             let response = try XCTUnwrap(HTTPURLResponse(
                 url: request.url!,
@@ -129,4 +187,8 @@ private final class ItineraryURLProtocolStub: URLProtocol {
         }
         return (204, Data())
     }
+}
+
+private extension Array {
+    var only: Element? { count == 1 ? first : nil }
 }

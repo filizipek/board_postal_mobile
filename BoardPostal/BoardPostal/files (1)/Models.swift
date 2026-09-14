@@ -315,6 +315,10 @@ struct UpdateDayItemRequest: Encodable {
     let orderIndex: Int?
 }
 
+struct ReorderRequest: Encodable {
+    let orderedIds: [String]
+}
+
 // MARK: - Collaborators
 
 struct Collaborator: Codable, Identifiable {

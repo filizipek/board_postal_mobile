@@ -732,6 +732,11 @@ protocol ItineraryAPIProviding {
     func createDay(tripId: String, body: CreateDayRequest) async throws -> TripDay
     func updateDay(tripId: String, dayId: String, body: UpdateDayRequest) async throws
     func createDayItem(tripId: String, dayId: String, body: CreateDayItemRequest) async throws -> TripDayItem
+    func updateDayItem(tripId: String, dayId: String, item: TripDayItem, title: String, type: String, notes: String?, time: String?) async throws -> TripDayItem
+    func deleteDay(tripId: String, dayId: String) async throws
+    func deleteDayItem(tripId: String, dayId: String, itemId: String) async throws
+    func reorderDays(tripId: String, orderedIds: [String]) async throws
+    func reorderDayItems(tripId: String, dayId: String, orderedIds: [String]) async throws
 }
 
 extension APIClient: ItineraryAPIProviding {}
@@ -1855,38 +1860,55 @@ struct EntryDetailView: View {
 
     @MainActor
     final class ItineraryViewModel: ObservableObject {
+        enum Mutation: Equatable {
+            case addingDay
+            case updatingDay(String)
+            case deletingDay(String)
+            case addingItem(dayId: String)
+            case updatingItem(dayId: String, itemId: String)
+            case deletingItem(dayId: String, itemId: String)
+            case reorderingDays
+            case reorderingItems(dayId: String)
+        }
+
         let tripId: String
         private let api: any ItineraryAPIProviding
         @Published var days: [TripDay]
         @Published var isLoading = false
         @Published var error: String? = nil
-        @Published var isAddingDay = false
-        @Published var isSavingItem = false
-        @Published var isUpdatingDay = false
+        @Published private(set) var activeMutation: Mutation?
+
+        var isAddingDay: Bool { activeMutation == .addingDay }
+        var isSavingItem: Bool {
+            if case .addingItem = activeMutation { return true }
+            return false
+        }
+        var isUpdatingDay: Bool {
+            if case .updatingDay = activeMutation { return true }
+            return false
+        }
+        var isMutating: Bool { activeMutation != nil }
 
         init(tripId: String, days: [TripDay]) {
             self.tripId = tripId
             api = APIClient.shared
-            self.days = days.sorted {
-                $0.dayNumber < $1.dayNumber }
+            self.days = Self.stablyOrderedDays(days)
         }
 
         init(tripId: String, days: [TripDay], api: any ItineraryAPIProviding) {
             self.tripId = tripId
             self.api = api
-            self.days = days.sorted {
-                $0.dayNumber < $1.dayNumber }
+            self.days = Self.stablyOrderedDays(days)
         }
 
         var sortedDays: [TripDay] {
-            days.sorted { $0.dayNumber < $1.dayNumber }
+            Self.stablyOrderedDays(days)
         }
 
         @discardableResult
         func addDay() async -> Bool {
-            guard !isAddingDay else { return false }
-            isAddingDay = true
-            defer { isAddingDay = false }
+            guard begin(.addingDay) else { return false }
+            defer { finishMutation() }
             let nextNumber = (days.map {
                 $0.dayNumber }.max() ?? 0) + 1
             do {
@@ -1904,11 +1926,15 @@ struct EntryDetailView: View {
             }
         }
 
+        @discardableResult
         func updateDay(_ day: TripDay,
                        title: String,
-                       date: String?) async {
-            isUpdatingDay = true
-            defer { isUpdatingDay = false }
+                       date: String?) async -> String? {
+            guard days.contains(where: { $0.id == day.id }) else {
+                return reportMissing("This itinerary day is no longer available.")
+            }
+            guard begin(.updatingDay(day.id)) else { return busyMessage }
+            defer { finishMutation() }
             do {
                 let body = UpdateDayRequest(
                     title: title.isEmpty ? nil : title,
@@ -1928,19 +1954,26 @@ struct EntryDetailView: View {
                         items: currentDay.items
                     )
                 }
+                return nil
             } catch {
-                self.error = error.localizedDescription
+                return report(error)
             }
         }
 
-        func deleteDay(id: String) async {
+        @discardableResult
+        func deleteDay(id: String) async -> String? {
+            guard days.contains(where: { $0.id == id }) else {
+                return reportMissing("This itinerary day is no longer available.")
+            }
+            guard begin(.deletingDay(id)) else { return busyMessage }
+            defer { finishMutation() }
             do {
-                try await APIClient.shared.requestVoid(
-                    .day(tripId: tripId, dayId: id),
-                    method: .delete)
+                try await api.deleteDay(tripId: tripId, dayId: id)
+                guard days.contains(where: { $0.id == id }) else { return nil }
                 days.removeAll { $0.id == id }
+                return nil
             } catch {
-                self.error = error.localizedDescription
+                return report(error)
             }
         }
 
@@ -1950,16 +1983,13 @@ struct EntryDetailView: View {
                      title: String,
                      notes: String?,
                      time: String?) async -> String? {
-            guard !isSavingItem else {
-                return "An itinerary item is already being saved."
-            }
             guard let currentDay = days.first(where: { $0.id == day.id }) else {
                 let message = "This itinerary day is no longer available."
                 error = message
                 return message
             }
-            isSavingItem = true
-            defer { isSavingItem = false }
+            guard begin(.addingItem(dayId: day.id)) else { return busyMessage }
+            defer { finishMutation() }
             do {
                 let nextOrder = (currentDay.items.map {
                     $0.orderIndex }.max() ?? -1) + 1
@@ -2019,19 +2049,52 @@ struct EntryDetailView: View {
                 items: items)
         }
 
+        @discardableResult
+        func updateItem(
+            dayId: String,
+            itemId: String,
+            title: String,
+            type: String,
+            notes: String?,
+            time: String?
+        ) async -> String? {
+            guard let item = days.first(where: { $0.id == dayId })?.items.first(where: { $0.id == itemId }) else {
+                return reportMissing("This itinerary item is no longer available.")
+            }
+            guard begin(.updatingItem(dayId: dayId, itemId: itemId)) else { return busyMessage }
+            defer { finishMutation() }
+            do {
+                let updated = try await api.updateDayItem(
+                    tripId: tripId, dayId: dayId, item: item,
+                    title: title, type: type, notes: notes, time: time
+                )
+                guard let dayIndex = days.firstIndex(where: { $0.id == dayId }),
+                      let itemIndex = days[dayIndex].items.firstIndex(where: { $0.id == itemId }) else {
+                    return nil
+                }
+                let currentDay = days[dayIndex]
+                var items = currentDay.items
+                items[itemIndex] = updated
+                days[dayIndex] = replacingItems(in: currentDay, with: items)
+                return nil
+            } catch { return report(error) }
+        }
+
         func replaceLoadedDays(_ loadedDays: [TripDay]) {
-            days = loadedDays.sorted { $0.dayNumber < $1.dayNumber }
+            guard activeMutation == nil else { return }
+            days = Self.stablyOrderedDays(loadedDays)
         }
 
         @discardableResult
         func deleteItem(dayId: String,
                         itemId: String) async -> String? {
+            guard days.first(where: { $0.id == dayId })?.items.contains(where: { $0.id == itemId }) == true else {
+                return reportMissing("This itinerary item is no longer available.")
+            }
+            guard begin(.deletingItem(dayId: dayId, itemId: itemId)) else { return busyMessage }
+            defer { finishMutation() }
             do {
-                try await APIClient.shared.requestVoid(
-                    .dayItem(tripId: tripId,
-                             dayId: dayId,
-                             itemId: itemId),
-                    method: .delete)
+                try await api.deleteDayItem(tripId: tripId, dayId: dayId, itemId: itemId)
                 if let di = days.firstIndex(
                     where: { $0.id == dayId }) {
                     let updatedDay = days[di]
@@ -2052,6 +2115,113 @@ struct EntryDetailView: View {
                 self.error = message
                 return message
             }
+        }
+
+        @discardableResult
+        func reorderDays(_ orderedIds: [String]) async -> String? {
+            guard !orderedIds.isEmpty else {
+                return reportMissing("Choose at least one day to reorder.")
+            }
+            guard begin(.reorderingDays) else { return busyMessage }
+            defer { finishMutation() }
+            do {
+                try await api.reorderDays(tripId: tripId, orderedIds: orderedIds)
+                let indexes = backendIndexes(for: orderedIds)
+                days = Self.stablyOrderedDays(days.map { day in
+                    guard let orderIndex = indexes[day.id] else { return day }
+                    return TripDay(
+                        id: day.id, tripId: day.tripId,
+                        dayNumber: day.dayNumber, title: day.title,
+                        date: day.date, orderIndex: orderIndex,
+                        items: day.items)
+                })
+                return nil
+            } catch { return report(error) }
+        }
+
+        @discardableResult
+        func reorderItems(dayId: String, orderedIds: [String]) async -> String? {
+            guard days.contains(where: { $0.id == dayId }) else {
+                return reportMissing("This itinerary day is no longer available.")
+            }
+            guard !orderedIds.isEmpty else {
+                return reportMissing("Choose at least one item to reorder.")
+            }
+            guard begin(.reorderingItems(dayId: dayId)) else { return busyMessage }
+            defer { finishMutation() }
+            do {
+                try await api.reorderDayItems(tripId: tripId, dayId: dayId, orderedIds: orderedIds)
+                guard let currentIndex = days.firstIndex(where: { $0.id == dayId }) else { return nil }
+                let currentDay = days[currentIndex]
+                let indexes = backendIndexes(for: orderedIds)
+                let items = Self.stablyOrderedItems(currentDay.items.map { item in
+                    guard let orderIndex = indexes[item.id] else { return item }
+                    return TripDayItem(
+                        id: item.id, tripDayId: item.tripDayId,
+                        type: item.type, title: item.title,
+                        notes: item.notes, time: item.time,
+                        orderIndex: orderIndex, placeId: item.placeId)
+                })
+                days[currentIndex] = replacingItems(in: currentDay, with: items)
+                return nil
+            } catch { return report(error) }
+        }
+
+        private var busyMessage: String {
+            "Another itinerary change is already in progress."
+        }
+
+        private func begin(_ mutation: Mutation) -> Bool {
+            guard activeMutation == nil else { return false }
+            error = nil
+            activeMutation = mutation
+            return true
+        }
+
+        private func finishMutation() { activeMutation = nil }
+
+        @discardableResult
+        private func report(_ source: Error) -> String {
+            let message = source.localizedDescription
+            error = message
+            return message
+        }
+
+        @discardableResult
+        private func reportMissing(_ message: String) -> String {
+            error = message
+            return message
+        }
+
+        private func replacingItems(in day: TripDay, with items: [TripDayItem]) -> TripDay {
+            TripDay(id: day.id, tripId: day.tripId, dayNumber: day.dayNumber,
+                    title: day.title, date: day.date, orderIndex: day.orderIndex, items: items)
+        }
+
+        private func backendIndexes(for orderedIds: [String]) -> [String: Int] {
+            var indexes: [String: Int] = [:]
+            for (index, id) in orderedIds.enumerated() {
+                indexes[id] = index
+            }
+            return indexes
+        }
+
+        private static func stablyOrderedDays(_ days: [TripDay]) -> [TripDay] {
+            days.enumerated().sorted {
+                if $0.element.orderIndex != $1.element.orderIndex {
+                    return $0.element.orderIndex < $1.element.orderIndex
+                }
+                return $0.offset < $1.offset
+            }.map(\.element)
+        }
+
+        private static func stablyOrderedItems(_ items: [TripDayItem]) -> [TripDayItem] {
+            items.enumerated().sorted {
+                if $0.element.orderIndex != $1.element.orderIndex {
+                    return $0.element.orderIndex < $1.element.orderIndex
+                }
+                return $0.offset < $1.offset
+            }.map(\.element)
         }
     }
 
@@ -2139,6 +2309,7 @@ struct EntryDetailView: View {
                                     day: day,
                                     isExpanded: expandedDayId
                                         == day.id,
+                                    isMutationActive: viewModel.isMutating,
                                     onToggle: {
                                         withAnimation(
                                             .spring(
@@ -2150,10 +2321,12 @@ struct EntryDetailView: View {
                                         }
                                     },
                                     onAddItem: {
+                                        guard !viewModel.isMutating else { return }
                                         selectedDay = day
                                         showAddItem = true
                                     },
                                     onEditItem: { item in
+                                        guard !viewModel.isMutating else { return }
                                         if item.itemType == .place,
                                            let placeId = item.placeId,
                                            let place = places.first(where: {
@@ -2212,39 +2385,23 @@ struct EntryDetailView: View {
                                 .padding(20)
                             }
                             .buttonStyle(.plain)
-                            .disabled(viewModel.isAddingDay)
+                            .disabled(viewModel.isMutating)
                         }
                     }
                 }
             }
             .sheet(isPresented: $showAddItem) {
                 if let day = selectedDay {
-                    AddDayItemSheet(day: day) {
-                        type, title, notes, time in
-                        await viewModel.addItem(
-                            to: day,
-                            type: type,
-                            title: title,
-                            notes: notes,
-                            time: time)
-                    }
+                    AddDayItemSheet(day: day, viewModel: viewModel)
                     .presentationDetents([.medium, .large])
                     .presentationDragIndicator(.hidden)
                 }
             }
             .sheet(item: $itemToEdit) { context in
                 DayItemEditorSheet(
-                    tripId: tripId,
                     dayId: context.dayId,
                     item: context.item,
-                    onSave: { updated in
-                        viewModel.replaceDayItem(updated)
-                    },
-                    onDelete: {
-                        await viewModel.deleteItem(
-                            dayId: context.dayId,
-                            itemId: context.item.id)
-                    }
+                    viewModel: viewModel
                 )
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.hidden)
@@ -2456,11 +2613,21 @@ struct EntryDetailView: View {
     struct DaySection: View {
         let day: TripDay
         let isExpanded: Bool
+        let isMutationActive: Bool
         let onToggle: () -> Void
         let onAddItem: () -> Void
         let onEditItem: (TripDayItem) -> Void
         let onDeleteItem: (String) -> Void
         let onDeleteDay: () -> Void
+
+        private var sortedItems: [TripDayItem] {
+            day.items.enumerated().sorted {
+                if $0.element.orderIndex != $1.element.orderIndex {
+                    return $0.element.orderIndex < $1.element.orderIndex
+                }
+                return $0.offset < $1.offset
+            }.map(\.element)
+        }
 
         var body: some View {
             VStack(alignment: .leading, spacing: 0) {
@@ -2512,13 +2679,12 @@ struct EntryDetailView: View {
                     Button(role: .destructive, action: onDeleteDay) {
                         Label("Delete Day", systemImage: "trash")
                     }
+                    .disabled(isMutationActive)
                 }
 
                 if isExpanded {
                     VStack(spacing: 0) {
-                        ForEach(day.items.sorted {
-                            $0.orderIndex
-                            < $1.orderIndex }) { item in
+                        ForEach(sortedItems) { item in
                             DayItemRow(item: item)
                                 .contentShape(Rectangle())
                                 .onTapGesture { onEditItem(item) }
@@ -2528,6 +2694,7 @@ struct EntryDetailView: View {
                                     } label: {
                                         Label("Delete Item", systemImage: "trash")
                                     }
+                                    .disabled(isMutationActive)
                                 }
                             BPDivider()
                         }
@@ -2550,6 +2717,7 @@ struct EntryDetailView: View {
                         }
                         .buttonStyle(.plain)
                         .background(Color.white)
+                        .disabled(isMutationActive)
                     }
                 }
             }
@@ -2629,14 +2797,13 @@ struct EntryDetailView: View {
 
     struct AddDayItemSheet: View {
         let day: TripDay
-        let onAdd: (String, String, String?, String?) async -> String?
+        @ObservedObject var viewModel: ItineraryViewModel
         @Environment(\.dismiss) var dismiss
 
         @State private var selectedType = "place"
         @State private var title = ""
         @State private var notes = ""
         @State private var time = ""
-        @State private var isSaving = false
         @State private var saveError: String? = nil
 
         let types = [
@@ -2754,12 +2921,12 @@ struct EntryDetailView: View {
                     BPButton(
                         "Add to Day \(day.dayNumber)",
                         style: .primary,
-                        isLoading: isSaving
+                        isLoading: viewModel.activeMutation == .addingItem(dayId: day.id)
                     ) {
                         Task { await save() }
                     }
                     .disabled(title.trimmingCharacters(
-                        in: .whitespaces).isEmpty || isSaving)
+                        in: .whitespaces).isEmpty || viewModel.isMutating)
                     .padding(16)
                 }
                 .background(Color.bpBackground)
@@ -2774,7 +2941,7 @@ struct EntryDetailView: View {
                         Button("Cancel") { dismiss() }
                             .buttonStyle(.plain)
                             .foregroundColor(.bpTextSecondary)
-                            .disabled(isSaving)
+                            .disabled(viewModel.isMutating)
                     }
                     ToolbarItem(placement: .principal) {
                         Text("Add to Day \(day.dayNumber)")
@@ -2783,19 +2950,17 @@ struct EntryDetailView: View {
                     }
                 }
             }
-            .interactiveDismissDisabled(isSaving)
+            .interactiveDismissDisabled(viewModel.isMutating)
         }
 
         private func save() async {
-            guard !isSaving else { return }
-            isSaving = true
             saveError = nil
-            defer { isSaving = false }
-            let error = await onAdd(
-                selectedType,
-                title,
-                notes.isEmpty ? nil : notes,
-                time.isEmpty ? nil : time
+            let error = await viewModel.addItem(
+                to: day,
+                type: selectedType,
+                title: title,
+                notes: notes.isEmpty ? nil : notes,
+                time: time.isEmpty ? nil : time
             )
             if let error {
                 saveError = error
@@ -2814,37 +2979,18 @@ struct EntryDetailView: View {
         }
     }
 
-    enum ItemEditorMutationState: Equatable {
-        case idle
-        case saving
-        case deleting
-
-        mutating func begin(_ operation: Self) -> Bool {
-            guard self == .idle, operation != .idle else { return false }
-            self = operation
-            return true
-        }
-
-        mutating func finish() {
-            self = .idle
-        }
-    }
-
     // MARK: - DayItemEditorSheet
 
     struct DayItemEditorSheet: View {
-        let tripId: String
         let dayId: String
         let item: TripDayItem
-        let onSave: (TripDayItem) -> Void
-        let onDelete: () async -> String?
+        @ObservedObject var viewModel: ItineraryViewModel
         @Environment(\.dismiss) private var dismiss
 
         @State private var title: String
         @State private var selectedType: String
         @State private var notes: String
         @State private var time: String
-        @State private var mutationState = ItemEditorMutationState.idle
         @State private var saveError: String? = nil
         @State private var showDeleteConfirm = false
 
@@ -2856,17 +3002,13 @@ struct EntryDetailView: View {
         ]
 
         init(
-            tripId: String,
             dayId: String,
             item: TripDayItem,
-            onSave: @escaping (TripDayItem) -> Void,
-            onDelete: @escaping () async -> String?
+            viewModel: ItineraryViewModel
         ) {
-            self.tripId = tripId
             self.dayId = dayId
             self.item = item
-            self.onSave = onSave
-            self.onDelete = onDelete
+            self.viewModel = viewModel
             _title = State(initialValue: item.title ?? "")
             _selectedType = State(initialValue: item.type)
             _notes = State(initialValue: item.notes ?? "")
@@ -2885,7 +3027,7 @@ struct EntryDetailView: View {
         }
 
         private var canSave: Bool {
-            !trimmedTitle.isEmpty && hasChanges && mutationState == .idle
+            !trimmedTitle.isEmpty && hasChanges && !viewModel.isMutating
         }
 
         var body: some View {
@@ -2996,7 +3138,7 @@ struct EntryDetailView: View {
                         showDeleteConfirm = true
                     } label: {
                         HStack(spacing: 8) {
-                            if mutationState == .deleting {
+                            if viewModel.activeMutation == .deletingItem(dayId: dayId, itemId: item.id) {
                                 ProgressView()
                                     .tint(.bpError)
                                     .scaleEffect(0.8)
@@ -3014,7 +3156,7 @@ struct EntryDetailView: View {
                         .background(Color.bpError.opacity(0.06))
                     }
                     .buttonStyle(.plain)
-                    .disabled(mutationState != .idle)
+                    .disabled(viewModel.isMutating)
                 }
                 .background(Color.bpBackground)
                 .navigationBarTitleDisplayMode(.inline)
@@ -3025,7 +3167,7 @@ struct EntryDetailView: View {
                         Button("Cancel") { dismiss() }
                             .buttonStyle(.plain)
                             .foregroundColor(.bpTextSecondary)
-                            .disabled(mutationState != .idle)
+                            .disabled(viewModel.isMutating)
                     }
                     ToolbarItem(placement: .principal) {
                         Text("Edit item")
@@ -3036,7 +3178,7 @@ struct EntryDetailView: View {
                         Button {
                             Task { await save() }
                         } label: {
-                            if mutationState == .saving {
+                            if viewModel.activeMutation == .updatingItem(dayId: dayId, itemId: item.id) {
                                 ProgressView().tint(.bpCobalt)
                             } else {
                                 Text("Save")
@@ -3061,35 +3203,29 @@ struct EntryDetailView: View {
                     Text("This cannot be undone.")
                 }
             }
-            .interactiveDismissDisabled(mutationState != .idle)
+            .interactiveDismissDisabled(viewModel.isMutating)
         }
 
         private func save() async {
-            guard mutationState.begin(.saving) else { return }
             saveError = nil
-            defer { mutationState.finish() }
-            do {
-                let updated = try await APIClient.shared.updateDayItem(
-                    tripId: tripId,
-                    dayId: dayId,
-                    item: item,
-                    title: trimmedTitle,
-                    type: selectedType,
-                    notes: notes.isEmpty ? nil : notes,
-                    time: time.isEmpty ? nil : time
-                )
-                onSave(updated)
+            let error = await viewModel.updateItem(
+                dayId: dayId,
+                itemId: item.id,
+                title: trimmedTitle,
+                type: selectedType,
+                notes: notes.isEmpty ? nil : notes,
+                time: time.isEmpty ? nil : time
+            )
+            if let error {
+                saveError = error
+            } else {
                 dismiss()
-            } catch {
-                saveError = error.localizedDescription
             }
         }
 
         private func delete() async {
-            guard mutationState.begin(.deleting) else { return }
             saveError = nil
-            defer { mutationState.finish() }
-            if let error = await onDelete() {
+            if let error = await viewModel.deleteItem(dayId: dayId, itemId: item.id) {
                 saveError = error
             } else {
                 dismiss()

@@ -286,6 +286,33 @@ extension APIClient {
         try await request(.dayItems(tripId: tripId, dayId: dayId), method: .post, body: body)
     }
 
+    func deleteDay(tripId: String, dayId: String) async throws {
+        try await requestVoid(.day(tripId: tripId, dayId: dayId), method: .delete)
+    }
+
+    func deleteDayItem(tripId: String, dayId: String, itemId: String) async throws {
+        try await requestVoid(
+            .dayItem(tripId: tripId, dayId: dayId, itemId: itemId),
+            method: .delete
+        )
+    }
+
+    func reorderDays(tripId: String, orderedIds: [String]) async throws {
+        try await requestVoid(
+            .reorderDays(tripId: tripId),
+            method: .put,
+            body: ReorderRequest(orderedIds: orderedIds)
+        )
+    }
+
+    func reorderDayItems(tripId: String, dayId: String, orderedIds: [String]) async throws {
+        try await requestVoid(
+            .reorderDayItems(tripId: tripId, dayId: dayId),
+            method: .put,
+            body: ReorderRequest(orderedIds: orderedIds)
+        )
+    }
+
     func updateEntry(
         tripId: String,
         entryId: String,
