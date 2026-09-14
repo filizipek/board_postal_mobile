@@ -214,14 +214,47 @@ struct CreateEntryRequest: Encodable {
 struct TripDay: Codable, Identifiable {
     let id: String
     // Server doesn't include tripId on day rows (it's in the URL path).
-    // Declared Optional so the synthesized Decodable's `decodeIfPresent`
-    // accepts the missing key — no custom init required.
+    // Optional because the wire response omits the URL-scoped trip identifier.
     let tripId: String?
     let dayNumber: Int
     let title: String?
     let date: String?      // "yyyy-MM-dd" string
     let orderIndex: Int
     let items: [TripDayItem]
+
+    private enum CodingKeys: String, CodingKey {
+        case id, tripId, dayNumber, title, date, orderIndex, items
+    }
+
+    init(
+        id: String,
+        tripId: String?,
+        dayNumber: Int,
+        title: String?,
+        date: String?,
+        orderIndex: Int,
+        items: [TripDayItem]
+    ) {
+        self.id = id
+        self.tripId = tripId
+        self.dayNumber = dayNumber
+        self.title = title
+        self.date = date
+        self.orderIndex = orderIndex
+        self.items = items
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        tripId = try container.decodeIfPresent(String.self, forKey: .tripId)
+        dayNumber = try container.decode(Int.self, forKey: .dayNumber)
+        title = try container.decodeIfPresent(String.self, forKey: .title)
+        date = try container.decodeIfPresent(String.self, forKey: .date)
+        orderIndex = try container.decode(Int.self, forKey: .orderIndex)
+        // Day creation returns the new day before it has an items collection.
+        items = try container.decodeIfPresent([TripDayItem].self, forKey: .items) ?? []
+    }
 
     var formattedDate: String? {
         guard let d = date else { return nil }
@@ -241,7 +274,8 @@ struct TripDayItem: Codable, Identifiable {
     // Same rationale as TripDay.tripId — wire response doesn't include it.
     let tripDayId: String?
     let type: String
-    let title: String
+    // The persisted backend entity and GET projection permit legacy null titles.
+    let title: String?
     let notes: String?
     let time: String?
     let orderIndex: Int

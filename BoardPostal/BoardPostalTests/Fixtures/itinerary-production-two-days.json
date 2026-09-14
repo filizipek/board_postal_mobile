@@ -1,0 +1,55 @@
+[
+  {
+    "id": "30000000-0000-0000-0000-000000000010",
+    "dayNumber": 1,
+    "title": "Arrival day",
+    "date": "2026-08-14",
+    "orderIndex": 0,
+    "items": [
+      {
+        "id": "40000000-0000-0000-0000-000000000010",
+        "type": "place",
+        "title": "Museum visit",
+        "notes": null,
+        "time": "10:00",
+        "orderIndex": 0,
+        "placeId": "50000000-0000-0000-0000-000000000010",
+        "placeName": "City Museum",
+        "placeCategory": "museum"
+      },
+      {
+        "id": "40000000-0000-0000-0000-000000000011",
+        "type": "transport",
+        "title": null,
+        "time": null,
+        "orderIndex": 1,
+        "placeId": null,
+        "placeName": null,
+        "placeCategory": null
+      },
+      {
+        "id": "40000000-0000-0000-0000-000000000012",
+        "type": "accommodation",
+        "title": "Hotel check-in",
+        "notes": "Front desk closes at midnight",
+        "orderIndex": 2
+      },
+      {
+        "id": "40000000-0000-0000-0000-000000000013",
+        "type": "note",
+        "title": "Confirm tomorrow's booking",
+        "notes": null,
+        "time": "19:30",
+        "orderIndex": 3
+      }
+    ]
+  },
+  {
+    "id": "30000000-0000-0000-0000-000000000011",
+    "dayNumber": 2,
+    "title": null,
+    "date": null,
+    "orderIndex": 1,
+    "items": []
+  }
+]

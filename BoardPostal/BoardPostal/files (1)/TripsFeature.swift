@@ -526,6 +526,23 @@ protocol SubmissionAPIProviding {
 
 extension APIClient: SubmissionAPIProviding {}
 
+enum ItineraryLoadState: Equatable {
+    case loading
+    case loaded
+    case failed
+}
+
+@MainActor
+protocol ItineraryDaysLoading {
+    func loadDays(tripId: String) async throws -> [TripDay]
+}
+
+extension APIClient: ItineraryDaysLoading {
+    func loadDays(tripId: String) async throws -> [TripDay] {
+        try await request(.days(tripId: tripId))
+    }
+}
+
 @MainActor
 final class TripDetailViewModel: ObservableObject {
     @Published var entries: [TripEntry] = []
@@ -536,21 +553,37 @@ final class TripDetailViewModel: ObservableObject {
     @Published var isLoading = false
     @Published var isSubmitting = false
     @Published var error: String?
+    @Published private(set) var itineraryLoadState: ItineraryLoadState = .loading
+    @Published private(set) var itineraryLoadRevision = 0
 
     @Published var trip: Trip
     private let api: APIClient
     private let submissionAPI: any SubmissionAPIProviding
+    private let itineraryAPI: any ItineraryDaysLoading
 
     init(trip: Trip) {
         self.trip = trip
         api = .shared
         submissionAPI = APIClient.shared
+        itineraryAPI = APIClient.shared
     }
 
     init(trip: Trip, submissionAPI: any SubmissionAPIProviding) {
         self.trip = trip
         api = .shared
         self.submissionAPI = submissionAPI
+        itineraryAPI = APIClient.shared
+    }
+
+    init(
+        trip: Trip,
+        submissionAPI: any SubmissionAPIProviding,
+        itineraryAPI: any ItineraryDaysLoading
+    ) {
+        self.trip = trip
+        api = .shared
+        self.submissionAPI = submissionAPI
+        self.itineraryAPI = itineraryAPI
     }
 
     func loadAll() async {
@@ -581,18 +614,7 @@ final class TripDetailViewModel: ObservableObject {
             }
 
             group.addTask { [weak self] in
-                guard let self else { return }
-                do {
-                    let result: [TripDay] = try await
-                        self.api.request(.days(tripId: self.trip.id))
-                    await MainActor.run {
-                        self.days = result
-                    }
-                } catch {
-                    // Surfaced (was previously swallowed by `catch {}`).
-                    // DecodingError prints with full key path + type mismatch.
-                    print("[TripDetailViewModel] days decode failed:", error)
-                }
+                await self?.loadItinerary()
             }
 
             group.addTask { [weak self] in
@@ -616,6 +638,17 @@ final class TripDetailViewModel: ObservableObject {
 
         await MainActor.run {
             self.isLoading = false
+        }
+    }
+
+    func loadItinerary() async {
+        itineraryLoadState = .loading
+        do {
+            days = try await itineraryAPI.loadDays(tripId: trip.id)
+            itineraryLoadRevision += 1
+            itineraryLoadState = .loaded
+        } catch {
+            itineraryLoadState = .failed
         }
     }
 
@@ -1342,7 +1375,10 @@ struct TripDetailView: View {
             ItineraryTabView(
                 tripId: viewModel.trip.id,
                 days: viewModel.days,
-                places: viewModel.places)
+                places: viewModel.places,
+                loadState: viewModel.itineraryLoadState,
+                loadRevision: viewModel.itineraryLoadRevision,
+                onRetry: { await viewModel.loadItinerary() })
         case 3:
             MapTabView(places: viewModel.places)
                 .frame(minHeight: UIScreen.main.bounds.height - 480)
@@ -1943,6 +1979,10 @@ struct EntryDetailView: View {
                 items: items)
         }
 
+        func replaceLoadedDays(_ loadedDays: [TripDay]) {
+            days = loadedDays.sorted { $0.dayNumber < $1.dayNumber }
+        }
+
         @discardableResult
         func deleteItem(dayId: String,
                         itemId: String) async -> String? {
@@ -1980,6 +2020,10 @@ struct EntryDetailView: View {
     struct ItineraryTabView: View {
         let tripId: String
         let places: [TripPlace]
+        let loadedDays: [TripDay]
+        let loadState: ItineraryLoadState
+        let loadRevision: Int
+        let onRetry: @MainActor () async -> Void
         @StateObject var viewModel: ItineraryViewModel
         @State private var showAddItem = false
         @State private var selectedDay: TripDay? = nil
@@ -2003,9 +2047,20 @@ struct EntryDetailView: View {
             var id: String { item.id }
         }
 
-        init(tripId: String, days: [TripDay], places: [TripPlace] = []) {
+        init(
+            tripId: String,
+            days: [TripDay],
+            places: [TripPlace] = [],
+            loadState: ItineraryLoadState = .loaded,
+            loadRevision: Int = 0,
+            onRetry: @escaping @MainActor () async -> Void = {}
+        ) {
             self.tripId = tripId
             self.places = places
+            loadedDays = days
+            self.loadState = loadState
+            self.loadRevision = loadRevision
+            self.onRetry = onRetry
             _viewModel = StateObject(wrappedValue:
                 ItineraryViewModel(tripId: tripId,
                                    days: days))
@@ -2013,8 +2068,16 @@ struct EntryDetailView: View {
 
         var body: some View {
             VStack(spacing: 0) {
-                if viewModel.isLoading {
+                if loadState == .loading {
                     BPLoadingView().frame(height: 200)
+                } else if loadState == .failed {
+                    BPEmptyState(
+                        icon: "exclamationmark.triangle",
+                        title: "Couldn't load itinerary",
+                        message: "Please check your connection and try again.",
+                        actionTitle: "Retry",
+                        action: { Task { await onRetry() } }
+                    )
                 } else if viewModel.sortedDays.isEmpty {
                     BPEmptyState(
                         icon: "calendar",
@@ -2166,6 +2229,9 @@ struct EntryDetailView: View {
                     toast = BPToast(message: error)
                     viewModel.error = nil
                 }
+            }
+            .onChange(of: loadRevision) { _, _ in
+                viewModel.replaceLoadedDays(loadedDays)
             }
             .bpToast($toast)
         }
@@ -2480,7 +2546,7 @@ struct EntryDetailView: View {
                                         0.1))
                                 .cornerRadius(4)
                         }
-                        Text(item.title)
+                        Text(item.title ?? "Untitled item")
                             .font(.bpBodyBold)
                             .foregroundColor(.bpInk)
                     }
@@ -2761,7 +2827,7 @@ struct EntryDetailView: View {
             self.item = item
             self.onSave = onSave
             self.onDelete = onDelete
-            _title = State(initialValue: item.title)
+            _title = State(initialValue: item.title ?? "")
             _selectedType = State(initialValue: item.type)
             _notes = State(initialValue: item.notes ?? "")
             _time = State(initialValue: item.time ?? "")
@@ -2772,7 +2838,7 @@ struct EntryDetailView: View {
         }
 
         private var hasChanges: Bool {
-            title != item.title
+            title != (item.title ?? "")
                 || selectedType != item.type
                 || notes != (item.notes ?? "")
                 || time != (item.time ?? "")

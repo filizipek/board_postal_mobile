@@ -79,7 +79,7 @@ final class ItineraryViewModelTests: XCTestCase {
         let result = await viewModel.addItem(
             to: day,
             type: "place",
-            title: created.title,
+            title: try XCTUnwrap(created.title),
             notes: nil,
             time: nil
         )

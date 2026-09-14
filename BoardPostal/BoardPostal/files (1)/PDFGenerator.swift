@@ -78,7 +78,7 @@ private final class PDFDocumentLayout {
                 for item in day.items.sorted(by: { $0.orderIndex < $1.orderIndex }) {
                     let time = item.time.map { "\($0)  " } ?? ""
                     drawFlowing(
-                        "\(time)\(item.title) [\(formatType(item.type))]",
+                        "\(time)\(item.title ?? "Untitled item") [\(formatType(item.type))]",
                         font: .systemFont(ofSize: 10, weight: .medium),
                         leftInset: 12,
                         spacingAfter: 2
