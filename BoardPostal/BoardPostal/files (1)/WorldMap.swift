@@ -15,6 +15,22 @@ struct TripMapAnnotation: Identifiable {
     let trip: Trip
 }
 
+@MainActor
+protocol WorldMapAPIProviding {
+    func worldMapTrips() async throws -> [Trip]
+    func worldMapPlaces(tripId: String) async throws -> [TripPlace]
+}
+
+extension APIClient: WorldMapAPIProviding {
+    func worldMapTrips() async throws -> [Trip] {
+        try await request(.trips)
+    }
+
+    func worldMapPlaces(tripId: String) async throws -> [TripPlace] {
+        try await request(.tripPlaces(tripId: tripId))
+    }
+}
+
 // MARK: - WorldMapViewModel
 
 @MainActor
@@ -25,7 +41,7 @@ final class WorldMapViewModel: ObservableObject {
     @Published var error: String? = nil
     @Published var annotations: [TripMapAnnotation] = []
 
-    private let api = APIClient.shared
+    private let api: any WorldMapAPIProviding
 
     private let pinColors: [Color] = [
         .bpCobalt, .bpSaffron, .bpAzure,
@@ -41,56 +57,61 @@ final class WorldMapViewModel: ObservableObject {
         return colors[abs(hash) % colors.count]
     }
 
+    init(api: (any WorldMapAPIProviding)? = nil) {
+        self.api = api ?? APIClient.shared
+    }
+
     func loadTrips() async {
         isLoading = true
         error = nil
         annotations = []
         do {
-            let result: [Trip] = try await api.request(.trips)
+            let result = try await api.worldMapTrips()
             trips = result
-            let queue = trips.flatMap { trip in
-                trip.destinations.map { dest in
-                    (tripId: trip.id, city: dest.city, country: dest.country, trip: trip)
-                }
-            }
-            await geocodeAll(destinations: queue)
+            await loadStoredPlaceAnnotations(for: result)
         } catch {
             self.error = error.localizedDescription
         }
         isLoading = false
     }
 
-    func geocodeAll(
-        destinations: [(tripId: String, city: String, country: String, trip: Trip)]
-    ) async {
-        await withTaskGroup(of: TripMapAnnotation?.self) { group in
-            for dest in destinations {
-                let color = self.pinColor(for: dest.tripId)
-                group.addTask {
-                    let geocoder = CLGeocoder()
-                    let query = "\(dest.city), \(dest.country)"
-                    guard let placemark = try? await geocoder
-                        .geocodeAddressString(query).first,
-                          let loc = placemark.location
-                    else { return nil }
-                    return TripMapAnnotation(
-                        id: "\(dest.tripId)-\(dest.city)",
-                        tripId: dest.tripId,
-                        tripTitle: dest.trip.title,
-                        city: dest.city,
-                        country: dest.country,
-                        coordinate: loc.coordinate,
-                        color: color,
-                        trip: dest.trip
-                    )
-                }
+    func select(_ annotation: TripMapAnnotation) {
+        selectedTrip = annotation.trip
+    }
+
+    func dismissSelection() {
+        selectedTrip = nil
+    }
+
+    private func loadStoredPlaceAnnotations(for trips: [Trip]) async {
+        var loaded: [TripMapAnnotation] = []
+        for trip in trips {
+            guard let places = try? await api.worldMapPlaces(tripId: trip.id) else {
+                continue
             }
-            for await annotation in group {
-                if let a = annotation {
-                    await MainActor.run { self.annotations.append(a) }
-                }
+            for place in places {
+                guard let latitude = place.latitude,
+                      let longitude = place.longitude,
+                      latitude.isFinite,
+                      longitude.isFinite else { continue }
+                let coordinate = CLLocationCoordinate2D(
+                    latitude: latitude,
+                    longitude: longitude
+                )
+                guard CLLocationCoordinate2DIsValid(coordinate) else { continue }
+                loaded.append(TripMapAnnotation(
+                    id: "\(trip.id):\(place.id)",
+                    tripId: trip.id,
+                    tripTitle: trip.title,
+                    city: place.placeName,
+                    country: trip.destinationSummary,
+                    coordinate: coordinate,
+                    color: pinColor(for: trip.id),
+                    trip: trip
+                ))
             }
         }
+        annotations = loaded
     }
 }
 
@@ -111,19 +132,18 @@ struct WorldMapView: View {
             Map(position: $cameraPosition) {
                 ForEach(viewModel.annotations) { annotation in
                     Annotation(annotation.city, coordinate: annotation.coordinate) {
-                        TripPin(
-                            color: annotation.color,
-                            isSelected: viewModel.selectedTrip?.id == annotation.tripId
-                        )
-                        .onTapGesture {
+                        Button {
                             withAnimation(.easeInOut(duration: 0.2)) {
-                                if viewModel.selectedTrip?.id == annotation.tripId {
-                                    viewModel.selectedTrip = nil
-                                } else {
-                                    viewModel.selectedTrip = annotation.trip
-                                }
+                                viewModel.select(annotation)
                             }
+                        } label: {
+                            TripPin(
+                                color: annotation.color,
+                                isSelected: viewModel.selectedTrip?.id == annotation.tripId
+                            )
                         }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Open \(annotation.tripTitle) at \(annotation.city)")
                     }
                     .annotationTitles(.hidden)
                 }
@@ -157,11 +177,12 @@ struct WorldMapView: View {
 
                 Spacer()
             }
+            .allowsHitTesting(false)
 
             // Selected trip card (bottom)
             if let trip = viewModel.selectedTrip {
                 SelectedTripCard(trip: trip) {
-                    viewModel.selectedTrip = nil
+                    viewModel.dismissSelection()
                 }
                 .padding(.horizontal, 20)
                 .padding(.bottom, 32)

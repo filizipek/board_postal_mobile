@@ -41,7 +41,9 @@ struct RootView: View {
     var body: some View {
         Group {
 #if DEBUG
-            if let scenario = TripsVisualVerificationScenario.current {
+            if let scenario = Build3VisualScenario.current {
+                Build3VisualScenarioView(scenario: scenario)
+            } else if let scenario = TripsVisualVerificationScenario.current {
                 NavigationStack {
                     TripsVisualVerificationView(scenario: scenario)
                 }

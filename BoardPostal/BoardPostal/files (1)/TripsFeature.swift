@@ -696,7 +696,7 @@ struct TripDetailView: View {
     @State private var entryDeleteError: String? = nil
     @State private var showEntryDeleteErrorAlert = false
     @State private var isExportingPDF = false
-    @State private var pdfData: Data? = nil
+    @State private var pdfURL: URL? = nil
     @State private var showPDFShare = false
     private let pdfGenerator = PDFGenerator()
     @State private var submitMessage = ""
@@ -872,12 +872,7 @@ struct TripDetailView: View {
             }
         }
         .sheet(isPresented: $showPDFShare) {
-            if let data = pdfData {
-                let url = FileManager.default
-                    .temporaryDirectory
-                    .appendingPathComponent(
-                        "\(currentTrip.title).pdf")
-                let _ = try? data.write(to: url)
+            if let url = pdfURL {
                 AnyView(ShareSheet(items: [url]))
             } else {
                 AnyView(EmptyView())
@@ -1048,19 +1043,23 @@ struct TripDetailView: View {
     }
 
     private func exportPDF() async {
+        guard !isExportingPDF else { return }
         isExportingPDF = true
-        pdfGenerator.generate(
+        defer { isExportingPDF = false }
+        let data = pdfGenerator.generate(
             trip: currentTrip,
+            entries: viewModel.entries,
             days: viewModel.days,
             places: viewModel.places
-        ) { data in
-            DispatchQueue.main.async {
-                self.isExportingPDF = false
-                if let data {
-                    self.pdfData = data
-                    self.showPDFShare = true
-                }
-            }
+        )
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("BoardPostal-\(UUID().uuidString).pdf")
+        do {
+            try data.write(to: url, options: .atomic)
+            pdfURL = url
+            showPDFShare = true
+        } catch {
+            toast = BPToast(message: "Couldn't prepare the PDF. Please try again.")
         }
     }
 
@@ -1659,14 +1658,24 @@ struct EntryDetailView: View {
     }
 }
 
+    @MainActor
+    final class PlaceDetailSelection: ObservableObject {
+        @Published var selectedPlace: TripPlace? = nil
+
+        func select(_ place: TripPlace) { selectedPlace = place }
+        func dismiss() { selectedPlace = nil }
+    }
+
     // MARK: - PlacesTabView
 
     private struct PlacesTabView: View {
         let places: [TripPlace]
         let isLoading: Bool
         var onAddPlace: (() -> Void)? = nil
+        @StateObject private var placeSelection = PlaceDetailSelection()
         
         var body: some View {
+            Group {
             if isLoading {
                 BPLoadingView()
                     .frame(height: 200)
@@ -1681,13 +1690,20 @@ struct EntryDetailView: View {
             } else {
                 LazyVStack(spacing: 0) {
                     ForEach(Array(places.enumerated()), id: \.element.id) { index, tripPlace in
-                        PlaceRow(tripPlace: tripPlace)
+                        PlaceRow(tripPlace: tripPlace) { placeSelection.select(tripPlace) }
                         
                         if index < places.count - 1 {
                             BPDivider()
                         }
                     }
                 }
+            }
+            }
+            .sheet(
+                item: $placeSelection.selectedPlace,
+                onDismiss: placeSelection.dismiss
+            ) { place in
+                ItineraryPlaceDetailSheet(place: place)
             }
         }
     }
@@ -1696,6 +1712,7 @@ struct EntryDetailView: View {
     
     struct PlaceRow: View {
         let tripPlace: TripPlace
+        var onSelect: (() -> Void)? = nil
         
         private var displayName: String {
             tripPlace.placeName
@@ -1751,6 +1768,10 @@ struct EntryDetailView: View {
             }
             .padding(16)
             .background(Color.white)
+            .contentShape(Rectangle())
+            .onTapGesture { onSelect?() }
+            .accessibilityAddTraits(onSelect == nil ? [] : .isButton)
+            .accessibilityLabel("Open details for \(displayName)")
         }
     }
     
@@ -2151,40 +2172,101 @@ struct EntryDetailView: View {
     }
 
     struct PlaceNavigationURLs {
-        static func appleMaps(for place: TripPlace) -> URL? {
+        static func coordinate(for place: TripPlace) -> CLLocationCoordinate2D? {
             guard let latitude = place.latitude,
-                  let longitude = place.longitude else { return nil }
+                  let longitude = place.longitude,
+                  latitude.isFinite,
+                  longitude.isFinite,
+                  (-90...90).contains(latitude),
+                  (-180...180).contains(longitude) else { return nil }
+            return CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+        }
+
+        static func appleMaps(for place: TripPlace) -> URL? {
+            guard let coordinate = coordinate(for: place) else { return nil }
             var components = URLComponents(string: "https://maps.apple.com/")
             components?.queryItems = [
-                URLQueryItem(name: "daddr", value: "\(latitude),\(longitude)"),
+                URLQueryItem(name: "daddr", value: "\(coordinate.latitude),\(coordinate.longitude)"),
                 URLQueryItem(name: "q", value: place.placeName)
             ]
             return components?.url
         }
 
         static func googleMaps(for place: TripPlace) -> URL? {
-            guard let latitude = place.latitude,
-                  let longitude = place.longitude else { return nil }
+            guard let coordinate = coordinate(for: place) else { return nil }
             var components = URLComponents(string: "https://www.google.com/maps/dir/")
             components?.queryItems = [
                 URLQueryItem(name: "api", value: "1"),
-                URLQueryItem(name: "destination", value: "\(latitude),\(longitude)")
+                URLQueryItem(name: "destination", value: "\(coordinate.latitude),\(coordinate.longitude)")
             ]
             return components?.url
         }
     }
 
+    @MainActor
+    protocol PlaceNavigationOpening {
+        func openAppleMaps(for place: TripPlace)
+        func openGoogleMaps(for place: TripPlace)
+    }
+
+    @MainActor
+    final class SystemPlaceNavigationOpener: PlaceNavigationOpening {
+        func openAppleMaps(for place: TripPlace) {
+            guard let coordinate = PlaceNavigationURLs.coordinate(for: place) else { return }
+            let item = MKMapItem(placemark: MKPlacemark(coordinate: coordinate))
+            item.name = place.placeName
+            item.openInMaps(launchOptions: [
+                MKLaunchOptionsDirectionsModeKey: MKLaunchOptionsDirectionsModeDriving
+            ])
+        }
+
+        func openGoogleMaps(for place: TripPlace) {
+            guard let url = PlaceNavigationURLs.googleMaps(for: place) else { return }
+            UIApplication.shared.open(url)
+        }
+    }
+
+    @MainActor
+    final class PlaceNavigationController {
+        private let opener: any PlaceNavigationOpening
+
+        init(opener: any PlaceNavigationOpening) {
+            self.opener = opener
+        }
+
+        func canNavigate(_ place: TripPlace) -> Bool {
+            PlaceNavigationURLs.coordinate(for: place) != nil
+        }
+
+        func openAppleMaps(for place: TripPlace) {
+            guard canNavigate(place) else { return }
+            opener.openAppleMaps(for: place)
+        }
+
+        func openGoogleMaps(for place: TripPlace) {
+            guard canNavigate(place) else { return }
+            opener.openGoogleMaps(for: place)
+        }
+    }
+
     struct ItineraryPlaceDetailSheet: View {
         let place: TripPlace
-        let onEdit: () -> Void
+        let onEdit: (() -> Void)?
+        private let navigation: PlaceNavigationController
         @Environment(\.dismiss) private var dismiss
-        @Environment(\.openURL) private var openURL
         @State private var showDirections = false
         @State private var position: MapCameraPosition
 
-        init(place: TripPlace, onEdit: @escaping () -> Void) {
+        init(
+            place: TripPlace,
+            onEdit: (() -> Void)? = nil,
+            navigationOpener: (any PlaceNavigationOpening)? = nil
+        ) {
             self.place = place
             self.onEdit = onEdit
+            self.navigation = PlaceNavigationController(
+                opener: navigationOpener ?? SystemPlaceNavigationOpener()
+            )
             if let latitude = place.latitude, let longitude = place.longitude {
                 _position = State(initialValue: .region(MKCoordinateRegion(
                     center: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
@@ -2242,16 +2324,20 @@ struct EntryDetailView: View {
                     ToolbarItem(placement: .navigationBarLeading) {
                         Button("Done") { dismiss() }
                     }
-                    ToolbarItem(placement: .navigationBarTrailing) {
-                        Button("Edit", action: onEdit)
+                    if let onEdit {
+                        ToolbarItem(placement: .navigationBarTrailing) {
+                            Button("Edit", action: onEdit)
+                        }
                     }
                 }
                 .confirmationDialog("Open directions in", isPresented: $showDirections) {
-                    if let url = PlaceNavigationURLs.appleMaps(for: place) {
-                        Button("Apple Maps") { openURL(url) }
-                    }
-                    if let url = PlaceNavigationURLs.googleMaps(for: place) {
-                        Button("Google Maps") { openURL(url) }
+                    if navigation.canNavigate(place) {
+                        Button("Apple Maps") {
+                            navigation.openAppleMaps(for: place)
+                        }
+                        Button("Google Maps") {
+                            navigation.openGoogleMaps(for: place)
+                        }
                     }
                     Button("Cancel", role: .cancel) {}
                 }
@@ -2918,7 +3004,7 @@ struct EntryDetailView: View {
     
     private struct MapTabView: View {
         let places: [TripPlace]
-        @State private var selectedPlace: TripPlace? = nil
+        @StateObject private var placeSelection = PlaceDetailSelection()
         @State private var position: MapCameraPosition = .automatic
 
         private var annotations: [TripPlaceAnnotation] {
@@ -2951,33 +3037,33 @@ struct EntryDetailView: View {
                                 coordinate: ann.coordinate,
                                 anchor: .bottom
                             ) {
-                                VStack(spacing: 2) {
-                                    ZStack {
-                                        Circle()
-                                            .fill(Color.bpCobalt)
-                                            .frame(width: 36, height: 36)
-                                            .shadow(
-                                                color: .bpCobalt.opacity(0.4),
-                                                radius: 4, x: 0, y: 2
-                                            )
-                                        Image(systemName: "mappin")
-                                            .font(.system(size: 16, weight: .semibold))
-                                            .foregroundColor(.white)
-                                    }
-                                    .scaleEffect(
-                                        selectedPlace?.id == ann.id ? 1.3 : 1.0
-                                    )
-                                    .animation(
-                                        .spring(response: 0.3),
-                                        value: selectedPlace?.id
-                                    )
-                                    .onTapGesture {
-                                        withAnimation {
-                                            selectedPlace =
-                                                selectedPlace?.id == ann.id ? nil : ann.place
+                                Button {
+                                    placeSelection.select(ann.place)
+                                } label: {
+                                    VStack(spacing: 2) {
+                                        ZStack {
+                                            Circle()
+                                                .fill(Color.bpCobalt)
+                                                .frame(width: 36, height: 36)
+                                                .shadow(
+                                                    color: .bpCobalt.opacity(0.4),
+                                                    radius: 4, x: 0, y: 2
+                                                )
+                                            Image(systemName: "mappin")
+                                                .font(.system(size: 16, weight: .semibold))
+                                                .foregroundColor(.white)
                                         }
+                                        .scaleEffect(
+                                            placeSelection.selectedPlace?.id == ann.id ? 1.3 : 1.0
+                                        )
+                                        .animation(
+                                            .spring(response: 0.3),
+                                            value: placeSelection.selectedPlace?.id
+                                        )
                                     }
                                 }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Open details for \(ann.name)")
                             }
                         }
                     }
@@ -2985,16 +3071,14 @@ struct EntryDetailView: View {
                     .ignoresSafeArea(edges: .bottom)
                     .onAppear { fitMap() }
 
-                    if let place = selectedPlace {
-                        placeCard(place)
-                            .padding(.horizontal, 16)
-                            .padding(.bottom, 24)
-                            .transition(
-                                .move(edge: .bottom).combined(with: .opacity)
-                            )
-                    }
                 }
-                .animation(.spring(response: 0.3), value: selectedPlace?.id)
+                .animation(.spring(response: 0.3), value: placeSelection.selectedPlace?.id)
+                .sheet(
+                    item: $placeSelection.selectedPlace,
+                    onDismiss: placeSelection.dismiss
+                ) { place in
+                    ItineraryPlaceDetailSheet(place: place)
+                }
             }
         }
 
@@ -3043,7 +3127,7 @@ struct EntryDetailView: View {
                 }
                 Spacer()
                 Button {
-                    withAnimation { selectedPlace = nil }
+                    withAnimation { placeSelection.dismiss() }
                 } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: 12, weight: .medium))
@@ -3432,13 +3516,39 @@ struct EntryDetailView: View {
     }
 
     // MARK: - TripPhotoPickerView
+
+    @MainActor
+    final class TripPhotoSelectionState: ObservableObject {
+        @Published var isPickerPresented = false
+        @Published var isLoadingAssets = false
+        @Published var error: String? = nil
+        @Published var selectedImages: [UIImage] = []
+
+        func openPicker() {
+            guard !isLoadingAssets else { return }
+            error = nil
+            isPickerPresented = true
+        }
+
+        func pickerDismissed() {
+            isPickerPresented = false
+        }
+
+        func appendLoaded(_ images: [UIImage]) {
+            selectedImages.append(contentsOf: images)
+        }
+
+        func reportLoadingFailure() {
+            error = "Couldn't load one of the selected photos. Try selecting it again."
+        }
+    }
     
     struct TripPhotoPickerView: View {
         let tripId: String
         let onComplete: () -> Void
         @Environment(\.dismiss) var dismiss
-        @State private var showPicker = false
-        @State private var selectedImages: [UIImage] = []
+        @StateObject private var selectionState = TripPhotoSelectionState()
+        @State private var pickerItems: [PhotosPickerItem] = []
         @State private var isUploading = false
         @State private var uploadError: String?
         @State private var uploadProgress = 0
@@ -3447,13 +3557,13 @@ struct EntryDetailView: View {
         var body: some View {
             NavigationStack {
                 VStack(spacing: 0) {
-                    if selectedImages.isEmpty {
+                    if selectionState.selectedImages.isEmpty {
                         BPEmptyState(
                             icon: "photo.on.rectangle.angled",
                             title: "Select photos",
                             message: "Choose photos from your library to add to this trip.",
                             actionTitle: "Open photo library",
-                            action: { showPicker = true }
+                            action: selectionState.openPicker
                         )
                         .padding(.top, 60)
                     } else {
@@ -3463,7 +3573,7 @@ struct EntryDetailView: View {
                                 GridItem(.flexible(), spacing: 2),
                                 GridItem(.flexible(), spacing: 2)
                             ], spacing: 2) {
-                                ForEach(Array(selectedImages.enumerated()), id: \.offset) { _, img in
+                                ForEach(Array(selectionState.selectedImages.enumerated()), id: \.offset) { _, img in
                                     Image(uiImage: img)
                                         .resizable()
                                         .scaledToFill()
@@ -3477,7 +3587,14 @@ struct EntryDetailView: View {
                         BPDivider()
                         
                         VStack(spacing: 12) {
-                            if isUploading {
+                            if selectionState.isLoadingAssets {
+                                HStack(spacing: 10) {
+                                    ProgressView().tint(.bpCobalt)
+                                    Text("Loading selected photos…")
+                                        .font(.bpCallout)
+                                        .foregroundColor(.bpTextSecondary)
+                                }
+                            } else if isUploading {
                                 HStack(spacing: 10) {
                                     ProgressView()
                                         .tint(.bpCobalt)
@@ -3486,11 +3603,11 @@ struct EntryDetailView: View {
                                         .foregroundColor(.bpTextSecondary)
                                 }
                             } else {
-                                BPButton("Upload \(selectedImages.count) photo\(selectedImages.count == 1 ? "" : "s")") {
+                                BPButton("Upload \(selectionState.selectedImages.count) photo\(selectionState.selectedImages.count == 1 ? "" : "s")") {
                                     Task { await uploadPhotos() }
                                 }
                             }
-                            if let error = uploadError {
+                            if let error = selectionState.error ?? uploadError {
                                 Text(error)
                                     .font(.bpCaption)
                                     .foregroundColor(.bpError)
@@ -3517,29 +3634,59 @@ struct EntryDetailView: View {
                             .font(.bpBodyBold)
                             .foregroundColor(.bpInk)
                     }
-                    if !selectedImages.isEmpty && !isUploading {
+                    if !selectionState.selectedImages.isEmpty && !isUploading {
                         ToolbarItem(placement: .navigationBarTrailing) {
-                            Button("Library") { showPicker = true }
+                            Button("Library", action: selectionState.openPicker)
                                 .buttonStyle(.plain)
                                 .font(.bpCallout)
                                 .foregroundColor(.bpCobalt)
                         }
                     }
                 }
-                .sheet(isPresented: $showPicker) {
-                    PhotoLibraryPicker(images: $selectedImages)
+                .photosPicker(
+                    isPresented: $selectionState.isPickerPresented,
+                    selection: $pickerItems,
+                    maxSelectionCount: 10,
+                    matching: .images
+                )
+                .onChange(of: pickerItems) { _, items in
+                    guard !items.isEmpty else { return }
+                    Task { await loadSelectedPhotos(items) }
                 }
-                .onAppear { showPicker = true }
             }
+        }
+
+        private func loadSelectedPhotos(_ items: [PhotosPickerItem]) async {
+            guard !selectionState.isLoadingAssets else { return }
+            selectionState.isLoadingAssets = true
+            selectionState.error = nil
+            defer {
+                selectionState.isLoadingAssets = false
+                pickerItems = []
+            }
+            var loaded: [UIImage] = []
+            for item in items {
+                do {
+                    guard let data = try await item.loadTransferable(type: Data.self),
+                          let image = UIImage(data: data) else {
+                        throw APIError.decodingError("The selected photo could not be read.")
+                    }
+                    loaded.append(image)
+                } catch {
+                    selectionState.reportLoadingFailure()
+                }
+            }
+            selectionState.appendLoaded(loaded)
         }
         
         private func uploadPhotos() async {
+            guard !isUploading, !selectionState.selectedImages.isEmpty else { return }
             isUploading = true
             uploadError = nil
             uploadProgress = 0
-            uploadTotal = selectedImages.count
+            uploadTotal = selectionState.selectedImages.count
 
-            for image in selectedImages {
+            for image in selectionState.selectedImages {
                 do {
                     let asset = try await MediaUploader.shared.upload(image)
                     struct LinkRequest: Encodable {
