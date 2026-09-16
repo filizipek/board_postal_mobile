@@ -3,6 +3,116 @@ import XCTest
 
 @MainActor
 final class SubmissionContractTests: XCTestCase {
+    func testReadinessMustNotTrustSummaryCountBeforeResourcesLoad() async {
+        let api = SubmissionAPIStub(result: .success(SubmitTripResponse(submissionId: "submission", status: "pending")))
+        let vm = TripDetailViewModel(trip: makeTrip(), submissionAPI: api)
+        XCTAssertNotNil(vm.submissionEligibilityError)
+        let result = await vm.submitForPublication(message: nil)
+        XCTAssertNotNil(result)
+        XCTAssertTrue(api.receivedMessages.isEmpty)
+    }
+
+    func testLoadedThirdDraftPrivateEntryOverridesStaleSummaryAndDeletionDisablesReadiness() async {
+        let loader = ReadinessLoader(entries: (1...2).map { makeEntry($0, visibility: "private", isDraft: true) }, places: [makePlace()])
+        let vm = TripDetailViewModel(trip: makeTrip(entryCount: 0), submissionAPI: SubmissionAPIStub(result: .failure(APIError.serverError(500))), readinessAPI: loader)
+        await vm.loadReadiness()
+        XCTAssertEqual(vm.submissionEligibilityError, "Trip must have at least 3 entries.")
+        loader.entries = .success((1...3).map { makeEntry($0, visibility: "private", isDraft: true) })
+        await vm.loadReadiness()
+        XCTAssertEqual(vm.trip.entryCount, 0)
+        XCTAssertNil(vm.submissionEligibilityError)
+        vm.removeEntry(id: "entry-3")
+        XCTAssertEqual(vm.submissionEligibilityError, "Trip must have at least 3 entries.")
+    }
+
+    func testEitherReadinessResourceFailureDisablesSubmissionAndRetryRestoresIt() async {
+        let loader = ReadinessLoader(entries: (1...3).map { makeEntry($0) }, places: [makePlace()])
+        let api = SubmissionAPIStub(result: .success(SubmitTripResponse(submissionId: "id", status: "pending")))
+        let vm = TripDetailViewModel(trip: makeTrip(), submissionAPI: api, readinessAPI: loader)
+        await vm.loadReadiness()
+        XCTAssertNil(vm.submissionEligibilityError)
+        for failEntries in [true, false] {
+            loader.entries = failEntries ? .failure(URLError(.timedOut)) : .success((1...3).map { makeEntry($0) })
+            loader.places = failEntries ? .success([makePlace()]) : .failure(APIError.decodingError("sanitized"))
+            await vm.loadReadiness()
+            XCTAssertEqual(vm.readinessLoadState, .failed)
+            XCTAssertNotNil(vm.submissionEligibilityError)
+            let result = await vm.submitForPublication(message: nil)
+            XCTAssertNotNil(result)
+            XCTAssertTrue(api.receivedMessages.isEmpty)
+        }
+        loader.entries = .success((1...3).map { makeEntry($0) })
+        loader.places = .success([makePlace()])
+        await vm.loadReadiness()
+        XCTAssertNil(vm.submissionEligibilityError)
+    }
+
+    func testLoadingCannotSubmitAndStaleRefreshCannotResurrectDeletedEntry() async {
+        let loader = ReadinessLoader(entries: (1...3).map { makeEntry($0) }, places: [makePlace()])
+        let api = SubmissionAPIStub(result: .success(SubmitTripResponse(submissionId: "id", status: "pending")))
+        let vm = TripDetailViewModel(trip: makeTrip(), submissionAPI: api, readinessAPI: loader)
+        await vm.loadReadiness()
+        loader.delayEntries = true
+        let refresh = Task { await vm.loadReadiness() }
+        while loader.continuation == nil { await Task.yield() }
+        XCTAssertEqual(vm.readinessLoadState, .loading)
+        let result = await vm.submitForPublication(message: nil)
+        XCTAssertNotNil(result)
+        XCTAssertTrue(api.receivedMessages.isEmpty)
+        vm.removeEntry(id: "entry-3")
+        loader.complete()
+        await refresh.value
+        XCTAssertEqual(vm.entries.count, 2)
+        XCTAssertEqual(vm.readinessLoadState, .failed)
+        loader.entries = .success((1...2).map { makeEntry($0) })
+        await vm.loadReadiness()
+        XCTAssertEqual(vm.readinessLoadState, .loaded)
+        XCTAssertNotNil(vm.submissionEligibilityError)
+    }
+
+    func testPlacePublicAndPublishedRequirementsRemainEnforcedWithLoadedEntries() async {
+        for (visibility, draft, hasPlace, expected) in [
+            ("private", false, true, "Trip must be public to submit."),
+            ("public", true, true, "Trip must be published to submit."),
+            ("public", false, false, "Trip must have at least 1 place.")
+        ] {
+            let loader = ReadinessLoader(entries: (1...3).map { makeEntry($0) }, places: hasPlace ? [makePlace()] : [])
+            let vm = TripDetailViewModel(trip: makeTrip(visibility: visibility, isDraft: draft), submissionAPI: SubmissionAPIStub(result: .failure(APIError.serverError(500))), readinessAPI: loader)
+            await vm.loadReadiness()
+            XCTAssertEqual(vm.submissionEligibilityError, expected)
+        }
+    }
+
+    func testCancelledReadinessLoadFailsClosedAndRetrySucceeds() async {
+        let loader = ReadinessLoader(entries: (1...3).map { makeEntry($0) }, places: [makePlace()])
+        let vm = TripDetailViewModel(trip: makeTrip(), submissionAPI: SubmissionAPIStub(result: .failure(APIError.serverError(500))), readinessAPI: loader)
+        loader.delayEntries = true
+        let load = Task { await vm.loadReadiness() }
+        while loader.continuation == nil { await Task.yield() }
+        load.cancel()
+        loader.complete()
+        await load.value
+        XCTAssertEqual(vm.readinessLoadState, .failed)
+        XCTAssertNotNil(vm.submissionEligibilityError)
+        await vm.loadReadiness()
+        XCTAssertNil(vm.submissionEligibilityError)
+    }
+
+    func testOlderReadinessResponseCannotOverwriteNewerLoadedEntries() async {
+        let loader = ReadinessLoader(entries: (1...2).map { makeEntry($0) }, places: [makePlace()])
+        let vm = TripDetailViewModel(trip: makeTrip(entryCount: 0), submissionAPI: SubmissionAPIStub(result: .failure(APIError.serverError(500))), readinessAPI: loader)
+        loader.delayEntries = true
+        let oldLoad = Task { await vm.loadReadiness() }
+        while loader.continuation == nil { await Task.yield() }
+        loader.entries = .success((1...3).map { makeEntry($0) })
+        await vm.loadReadiness()
+        XCTAssertNil(vm.submissionEligibilityError)
+        loader.complete()
+        await oldLoad.value
+        XCTAssertEqual(vm.entries.count, 3)
+        XCTAssertNil(vm.submissionEligibilityError)
+    }
+
     func testBackendEligibilityErrorIsPreserved() async throws {
         let api = makeAPI(status: 400, json: #"{"error":"Trip must have at least 3 entries."}"#)
 
@@ -36,9 +146,9 @@ final class SubmissionContractTests: XCTestCase {
 
     func testSubmissionStatePreventsReentryAndBecomesPending() async {
         let api = DelayedSubmissionAPI()
-        let viewModel = TripDetailViewModel(trip: makeTrip(), submissionAPI: api)
-        viewModel.entries = (1...3).map(makeEntry)
-        viewModel.places = [makePlace()]
+        let loader = ReadinessLoader(entries: (1...3).map { makeEntry($0) }, places: [makePlace()])
+        let viewModel = TripDetailViewModel(trip: makeTrip(), submissionAPI: api, readinessAPI: loader)
+        await viewModel.loadReadiness()
 
         XCTAssertNil(viewModel.submissionEligibilityError)
 
@@ -65,7 +175,9 @@ final class SubmissionContractTests: XCTestCase {
         let api = SubmissionAPIStub(result: .failure(
             APIError.badRequest("Trip must have at least 3 entries.")
         ))
-        let viewModel = TripDetailViewModel(trip: makeTrip(), submissionAPI: api)
+        let loader = ReadinessLoader(entries: (1...3).map { makeEntry($0) }, places: [makePlace()])
+        let viewModel = TripDetailViewModel(trip: makeTrip(), submissionAPI: api, readinessAPI: loader)
+        await viewModel.loadReadiness()
 
         let message = "Keep this message"
         let error = await viewModel.submitForPublication(message: message)
@@ -81,7 +193,9 @@ final class SubmissionContractTests: XCTestCase {
             submissionId: "70000000-0000-0000-0000-000000000001",
             status: "pending"
         )))
-        let viewModel = TripDetailViewModel(trip: makeTrip(), submissionAPI: api)
+        let loader = ReadinessLoader(entries: (1...3).map { makeEntry($0) }, places: [makePlace()])
+        let viewModel = TripDetailViewModel(trip: makeTrip(), submissionAPI: api, readinessAPI: loader)
+        await viewModel.loadReadiness()
 
         let result = await viewModel.submitForPublication(message: nil)
         XCTAssertNil(result)
@@ -140,7 +254,8 @@ final class SubmissionContractTests: XCTestCase {
 
     private func makeTrip(
         visibility: String = "public",
-        isDraft: Bool = false
+        isDraft: Bool = false,
+        entryCount: Int = 3
     ) -> Trip {
         Trip(
             id: "10000000-0000-0000-0000-000000000001",
@@ -158,13 +273,13 @@ final class SubmissionContractTests: XCTestCase {
             isPlanning: false,
             createdAt: Date(timeIntervalSince1970: 0),
             ownerId: "20000000-0000-0000-0000-000000000001",
-            entryCount: 3,
+            entryCount: entryCount,
             dayCount: 1,
             destinations: []
         )
     }
 
-    private func makeEntry(_ number: Int) -> TripEntry {
+    private func makeEntry(_ number: Int, visibility: String = "public", isDraft: Bool = false) -> TripEntry {
         TripEntry(
             id: "entry-\(number)",
             tripId: "10000000-0000-0000-0000-000000000001",
@@ -173,8 +288,8 @@ final class SubmissionContractTests: XCTestCase {
             entryDate: "2026-04-0\(number)",
             placeName: nil,
             orderIndex: number - 1,
-            visibility: "public",
-            isDraft: false,
+            visibility: visibility,
+            isDraft: isDraft,
             createdAt: Date(timeIntervalSince1970: 0),
             updatedAt: nil
         )
@@ -193,6 +308,31 @@ final class SubmissionContractTests: XCTestCase {
             orderIndex: 0,
             imageUrl: nil
         )
+    }
+}
+
+@MainActor
+private final class ReadinessLoader: TripReadinessLoading {
+    var entries: Result<[TripEntry], Error>
+    var places: Result<[TripPlace], Error>
+    var delayEntries = false
+    var continuation: CheckedContinuation<Void, Never>?
+    init(entries: [TripEntry], places: [TripPlace]) {
+        self.entries = .success(entries)
+        self.places = .success(places)
+    }
+    func loadEntries(tripId: String) async throws -> [TripEntry] {
+        let result = entries
+        if delayEntries {
+            delayEntries = false
+            await withCheckedContinuation { continuation = $0 }
+        }
+        return try result.get()
+    }
+    func loadPlaces(tripId: String) async throws -> [TripPlace] { try places.get() }
+    func complete() {
+        continuation?.resume()
+        continuation = nil
     }
 }
 

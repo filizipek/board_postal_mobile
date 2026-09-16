@@ -116,7 +116,7 @@ final class TripStateClientTests: XCTestCase {
         let publicPublished = TripDetailViewModel(
             trip: makeTrip(isDraft: false, visibility: "public")
         )
-        XCTAssertNil(publicPublished.submissionEligibilityError)
+        XCTAssertEqual(publicPublished.submissionEligibilityError, "Loading entries and places before checking Explore readiness.")
     }
 
     private var tripJSON: String {

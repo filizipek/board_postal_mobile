@@ -283,7 +283,29 @@ extension APIClient {
         dayId: String,
         body: CreateDayItemRequest
     ) async throws -> TripDayItem {
-        try await request(.dayItems(tripId: tripId, dayId: dayId), method: .post, body: body)
+        // The creation projection omits notes/placeId. Distinguish omission from
+        // explicit null so returned server values always remain authoritative.
+        struct Response: Decodable {
+            let item: TripDayItem
+            let hasNotes: Bool
+            let hasPlaceId: Bool
+            enum CodingKeys: String, CodingKey { case notes, placeId }
+            init(from decoder: Decoder) throws {
+                item = try TripDayItem(from: decoder)
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                hasNotes = container.contains(.notes)
+                hasPlaceId = container.contains(.placeId)
+            }
+        }
+        let response: Response = try await request(
+            .dayItems(tripId: tripId, dayId: dayId), method: .post, body: body)
+        let item = response.item
+        return TripDayItem(
+            id: item.id, tripDayId: item.tripDayId, type: item.type,
+            title: item.title,
+            notes: response.hasNotes ? item.notes : body.notes,
+            time: item.time, orderIndex: item.orderIndex,
+            placeId: response.hasPlaceId ? item.placeId : body.placeId)
     }
 
     func deleteDay(tripId: String, dayId: String) async throws {
