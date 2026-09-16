@@ -3,6 +3,32 @@ import XCTest
 
 @MainActor
 final class ItineraryViewModelTests: XCTestCase {
+    func testInvalidItemInputsNeverReachAPI() async throws {
+        let day: TripDay = try decodeFixture("itinerary-day")
+        let api = ItineraryAPIStub()
+        let vm = ItineraryViewModel(tripId: "trip-1", days: [day], api: api)
+        for time in ["9:00", "09.30", "24:00", "23:60", "text"] {
+            let error = await vm.addItem(to: day, type: "note", title: "Note", notes: nil, time: time)
+            XCTAssertNotNil(error)
+            XCTAssertNil(api.lastCreateItemBody)
+        }
+        for input in [(String(repeating: "x", count: 121), nil as String?), ("Note", String(repeating: "x", count: 501))] {
+            let error = await vm.addItem(to: day, type: "note", title: input.0, notes: input.1, time: nil)
+            XCTAssertNotNil(error)
+            XCTAssertNil(api.lastCreateItemBody)
+        }
+    }
+
+    func testWhitespaceOptionalInputsAreOmitted() async throws {
+        let day: TripDay = try decodeFixture("itinerary-day")
+        let created: TripDayItem = try decodeFixture("itinerary-created-item-partial")
+        let api = ItineraryAPIStub(createItemResult: .success(created))
+        let vm = ItineraryViewModel(tripId: "trip-1", days: [day], api: api)
+        _ = await vm.addItem(to: day, type: "note", title: "Note", notes: " \n ", time: " \n ")
+        XCTAssertNil(api.lastCreateItemBody?.notes)
+        XCTAssertNil(api.lastCreateItemBody?.time)
+    }
+
     func testConcurrentAddItemAcceptsOnlyOneRequestAndAppendsOnce() async throws {
         let day: TripDay = try decodeFixture("itinerary-day")
         let created: TripDayItem = try decodeFixture("itinerary-created-item-partial")
@@ -127,7 +153,7 @@ final class ItineraryViewModelTests: XCTestCase {
         let result = await viewModel.addItem(
             to: day,
             type: "note",
-            title: "",
+            title: "Rejected by server",
             notes: nil,
             time: nil
         )

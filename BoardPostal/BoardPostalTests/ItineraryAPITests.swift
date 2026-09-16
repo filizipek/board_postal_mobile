@@ -8,6 +8,7 @@ final class ItineraryAPITests: XCTestCase {
     override func setUp() {
         super.setUp()
         ItineraryURLProtocolStub.requests = []
+        ItineraryURLProtocolStub.overrideResponse = nil
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [ItineraryURLProtocolStub.self]
         api = APIClient(session: URLSession(configuration: configuration))
@@ -24,6 +25,112 @@ final class ItineraryAPITests: XCTestCase {
             dayId: "30000000-0000-0000-0000-000000000001",
             body: UpdateDayRequest(title: "Updated", date: nil, orderIndex: nil)
         )
+    }
+
+    func testValidAddItemSendsOneExactRequestForEveryType() async throws {
+        let day: TripDay = try decodeFixture("itinerary-day")
+        for (index, type) in ["place", "transport", "accommodation", "note"].enumerated() {
+            ItineraryURLProtocolStub.requests = []
+            ItineraryURLProtocolStub.overrideResponse = (201, Data(#"{"id":"created","type":"note","title":"Server title","time":"09:00","orderIndex":7}"#.utf8))
+            let vm = ItineraryViewModel(tripId: "trip-1", days: [day], api: api)
+            let time = index.isMultiple(of: 2) ? "09:00" : "23:59"
+            let error = await vm.addItem(to: day, type: type, title: "Note", notes: "Details", time: time)
+            XCTAssertNil(error)
+            let request = try XCTUnwrap(ItineraryURLProtocolStub.requests.only)
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.url?.path, "/api/trips/trip-1/days/\(day.id)/items")
+            let body = try decodedBody(request)
+            XCTAssertEqual(Set(body.keys), Set(["type", "title", "notes", "time", "orderIndex"]))
+            XCTAssertEqual(body["type"] as? String, type)
+            XCTAssertEqual(body["title"] as? String, "Note")
+            XCTAssertEqual(body["notes"] as? String, "Details")
+            XCTAssertEqual(body["time"] as? String, time)
+            XCTAssertEqual(body["orderIndex"] as? Int, (day.items.map(\.orderIndex).max() ?? -1) + 1)
+            XCTAssertEqual(vm.days[0].items.last?.notes, "Details")
+            XCTAssertEqual(vm.days[0].items.last?.title, "Server title")
+            XCTAssertEqual(vm.days[0].items.last?.orderIndex, 7)
+        }
+    }
+
+    func testInvalidFormInputsExposeInlineErrorWithoutRequest() async throws {
+        let day: TripDay = try decodeFixture("itinerary-day")
+        let vm = ItineraryViewModel(tripId: "trip-1", days: [day], api: api)
+        let form = AddDayItemFormState()
+        form.title = "Note"
+        for time in ["9:00", "09.30", "24:00", "09:60", "٠٩:٠٠"] {
+            form.time = time
+            let canDismiss = await form.save(day: day, viewModel: vm)
+            XCTAssertFalse(canDismiss)
+            XCTAssertTrue(form.saveError?.contains("HH:mm") == true)
+            XCTAssertEqual(form.time, time)
+            XCTAssertTrue(ItineraryURLProtocolStub.requests.isEmpty)
+        }
+        form.time = ""
+        for title in [" \n ", String(repeating: "x", count: 121), String(repeating: "😀", count: 61)] {
+            form.title = title
+            let canDismiss = await form.save(day: day, viewModel: vm)
+            XCTAssertFalse(canDismiss)
+            XCTAssertTrue(form.saveError?.contains("Title") == true)
+            XCTAssertTrue(ItineraryURLProtocolStub.requests.isEmpty)
+        }
+        form.title = "Note"
+        form.notes = String(repeating: "x", count: 501)
+        let canDismiss = await form.save(day: day, viewModel: vm)
+        XCTAssertFalse(canDismiss)
+        XCTAssertTrue(form.saveError?.contains("Notes") == true)
+        XCTAssertTrue(ItineraryURLProtocolStub.requests.isEmpty)
+    }
+
+    func testEmptyOptionalsAreNotEncodedAndTimeWhitespaceIsNormalized() async throws {
+        let day: TripDay = try decodeFixture("itinerary-day")
+        ItineraryURLProtocolStub.overrideResponse = (201, Data(#"{"id":"created","type":"note","title":"Note","time":null,"orderIndex":0}"#.utf8))
+        for time in [" \n ", " 09:00 "] {
+            ItineraryURLProtocolStub.requests = []
+            let vm = ItineraryViewModel(tripId: "trip-1", days: [day], api: api)
+            _ = await vm.addItem(to: day, type: "note", title: "Note", notes: " \n ", time: time)
+            let body = try decodedBody(XCTUnwrap(ItineraryURLProtocolStub.requests.only))
+            XCTAssertNil(body["notes"])
+            XCTAssertNil(body["placeId"])
+            XCTAssertEqual(body["time"] as? String, time.contains("09:00") ? "09:00" : nil)
+        }
+    }
+
+    func testCreationRetainsOmittedOptionalsButHonorsReturnedValuesAndNulls() async throws {
+        let body = CreateDayItemRequest(type: "place", title: "Submitted", notes: "Submitted notes", time: nil, orderIndex: 0, placeId: "place-1")
+        for optionalJSON in ["", #", "notes":null,"placeId":null"#, #", "notes":"Server notes","placeId":"server-place""#] {
+            ItineraryURLProtocolStub.overrideResponse = (201, Data((#"{"id":"server-id","type":"place","title":"Server title","time":null,"orderIndex":4"# + optionalJSON + "}").utf8))
+            let item = try await api.createDayItem(tripId: "trip-1", dayId: "day-1", body: body)
+            XCTAssertEqual(item.id, "server-id")
+            XCTAssertEqual(item.title, "Server title")
+            XCTAssertEqual(item.orderIndex, 4)
+            XCTAssertEqual(item.notes, optionalJSON.isEmpty ? "Submitted notes" : (optionalJSON.contains("Server notes") ? "Server notes" : nil))
+            XCTAssertEqual(item.placeId, optionalJSON.isEmpty ? "place-1" : (optionalJSON.contains("server-place") ? "server-place" : nil))
+        }
+    }
+
+    func testBackendFailurePreservesFormAndRetryCanDismissOnlyAfterSuccess() async throws {
+        let day: TripDay = try decodeFixture("itinerary-day")
+        let vm = ItineraryViewModel(tripId: "trip-1", days: [day], api: api)
+        let form = AddDayItemFormState()
+        form.selectedType = "transport"
+        form.title = "Train"
+        form.notes = "Keep details"
+        form.time = "09:00"
+        let failed = await form.save(day: day, viewModel: vm)
+        XCTAssertFalse(failed, "The sheet must remain open")
+        XCTAssertTrue(form.saveError?.contains("Time must be in HH:mm format.") == true)
+        XCTAssertEqual(form.title, "Train")
+        XCTAssertEqual(form.notes, "Keep details")
+        XCTAssertEqual(form.time, "09:00")
+        XCTAssertEqual(form.selectedType, "transport")
+        XCTAssertEqual(vm.days[0].items.count, day.items.count)
+        XCTAssertNil(vm.activeMutation)
+        ItineraryURLProtocolStub.overrideResponse = (201, Data(#"{"id":"created","type":"transport","title":"Train","time":"09:00","orderIndex":0}"#.utf8))
+        let succeeded = await form.save(day: day, viewModel: vm)
+        XCTAssertTrue(succeeded)
+        XCTAssertNil(form.saveError)
+        XCTAssertEqual(ItineraryURLProtocolStub.requests.count, 2)
+        XCTAssertEqual(vm.days[0].items.last?.notes, "Keep details")
     }
 
     func testItemUpdateAcceptsNoContentAndReturnsLocalProjection() async throws {
@@ -168,6 +275,7 @@ final class ItineraryAPITests: XCTestCase {
 }
 
 private final class ItineraryURLProtocolStub: URLProtocol {
+    static var overrideResponse: (Int, Data)?
     static var requests: [URLRequest] = []
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -207,6 +315,7 @@ private final class ItineraryURLProtocolStub: URLProtocol {
     override func stopLoading() {}
 
     private func response(for request: URLRequest) -> (Int, Data) {
+        if let response = Self.overrideResponse { return response }
         if request.httpMethod == "POST" {
             let validationJSON = """
             {

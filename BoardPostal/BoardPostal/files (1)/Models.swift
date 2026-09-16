@@ -308,6 +308,38 @@ struct CreateDayItemRequest: Encodable {
     let placeId: String?
 }
 
+enum DayItemInputValidation {
+    static func optionalValue(_ value: String?) -> String? {
+        guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return value
+    }
+
+    static func normalizedTime(_ value: String?) -> String? {
+        optionalValue(value)?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func error(title: String, notes: String?, time: String?) -> String? {
+        if title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Title is required."
+        }
+        // .NET validators measure UTF-16 string length, not grapheme count.
+        if title.utf16.count > 120 { return "Title must be 120 characters or fewer." }
+        if let notes = optionalValue(notes), notes.utf16.count > 500 {
+            return "Notes must be 500 characters or fewer."
+        }
+        if let time = normalizedTime(time) {
+            let bytes = Array(time.utf8)
+            guard bytes.count == 5, bytes[2] == 58,
+                  [0, 1, 3, 4].allSatisfy({ (48...57).contains(bytes[$0]) }),
+                  let hour = Int(time.prefix(2)), hour < 24,
+                  let minute = Int(time.suffix(2)), minute < 60 else {
+                return "Time must use 24-hour HH:mm format, for example 09:00."
+            }
+        }
+        return nil
+    }
+}
+
 struct UpdateDayItemRequest: Encodable {
     let title: String?
     let notes: String?

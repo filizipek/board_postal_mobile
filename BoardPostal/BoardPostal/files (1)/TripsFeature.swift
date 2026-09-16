@@ -550,6 +550,21 @@ extension APIClient: ItineraryDaysLoading {
 }
 
 @MainActor
+protocol TripReadinessLoading {
+    func loadEntries(tripId: String) async throws -> [TripEntry]
+    func loadPlaces(tripId: String) async throws -> [TripPlace]
+}
+
+extension APIClient: TripReadinessLoading {
+    func loadEntries(tripId: String) async throws -> [TripEntry] {
+        try await request(.entries(tripId: tripId))
+    }
+    func loadPlaces(tripId: String) async throws -> [TripPlace] {
+        try await request(.tripPlaces(tripId: tripId))
+    }
+}
+
+@MainActor
 final class TripDetailViewModel: ObservableObject {
     @Published var entries: [TripEntry] = []
     @Published var places: [TripPlace] = []
@@ -561,11 +576,15 @@ final class TripDetailViewModel: ObservableObject {
     @Published var error: String?
     @Published private(set) var itineraryLoadState: ItineraryLoadState = .loading
     @Published private(set) var itineraryLoadRevision = 0
+    @Published private(set) var readinessLoadState: ItineraryLoadState = .loading
 
     @Published var trip: Trip
     private let api: APIClient
     private let submissionAPI: any SubmissionAPIProviding
     private let itineraryAPI: any ItineraryDaysLoading
+    private let readinessAPI: any TripReadinessLoading
+    private var readinessGeneration = 0
+    private var entryRevision = 0
     private var sceneActivity: TripDetailSceneActivity = .active
 
     private var canPublishSceneUpdates: Bool {
@@ -577,6 +596,7 @@ final class TripDetailViewModel: ObservableObject {
         api = .shared
         submissionAPI = APIClient.shared
         itineraryAPI = APIClient.shared
+        readinessAPI = APIClient.shared
     }
 
     init(trip: Trip, submissionAPI: any SubmissionAPIProviding) {
@@ -584,47 +604,33 @@ final class TripDetailViewModel: ObservableObject {
         api = .shared
         self.submissionAPI = submissionAPI
         itineraryAPI = APIClient.shared
+        readinessAPI = APIClient.shared
     }
 
     init(
         trip: Trip,
         submissionAPI: any SubmissionAPIProviding,
-        itineraryAPI: any ItineraryDaysLoading
+        itineraryAPI: (any ItineraryDaysLoading)? = nil,
+        readinessAPI: (any TripReadinessLoading)? = nil
     ) {
         self.trip = trip
         api = .shared
         self.submissionAPI = submissionAPI
-        self.itineraryAPI = itineraryAPI
+        self.itineraryAPI = itineraryAPI ?? APIClient.shared
+        self.readinessAPI = readinessAPI ?? APIClient.shared
     }
 
     func loadAll() async {
         guard canPublishSceneUpdates else { return }
         isLoading = true
         error = nil
+        readinessGeneration += 1
+        readinessLoadState = .loading
 
         await withTaskGroup(of: Void.self) { group in
             group.addTask { [weak self] in
                 guard let self else { return }
-                do {
-                    let result: [TripEntry] = try await
-                        self.api.request(.entries(tripId: self.trip.id))
-                    await MainActor.run {
-                        guard self.canPublishSceneUpdates else { return }
-                        self.entries = result
-                    }
-                } catch {}
-            }
-
-            group.addTask { [weak self] in
-                guard let self else { return }
-                do {
-                    let result: [TripPlace] = try await
-                        self.api.request(.tripPlaces(tripId: self.trip.id))
-                    await MainActor.run {
-                        guard self.canPublishSceneUpdates else { return }
-                        self.places = result
-                    }
-                } catch {}
+                await self.loadReadiness()
             }
 
             group.addTask { [weak self] in
@@ -673,15 +679,59 @@ final class TripDetailViewModel: ObservableObject {
         }
     }
 
+    func loadReadiness() async {
+        guard canPublishSceneUpdates else { return }
+        readinessGeneration += 1
+        let generation = readinessGeneration
+        let revision = entryRevision
+        readinessLoadState = .loading
+        defer {
+            if sceneActivity == .active, generation == readinessGeneration,
+               readinessLoadState == .loading {
+                readinessLoadState = .failed
+            }
+        }
+        // Entry/place endpoints exclude deleted records. Keep successful resource
+        // displays independent, but require both successes before submission.
+        async let loadedEntries = readinessEntriesResult()
+        async let loadedPlaces = readinessPlacesResult()
+        let (entryResult, placeResult) = await (loadedEntries, loadedPlaces)
+        guard canPublishSceneUpdates, generation == readinessGeneration else { return }
+        guard revision == entryRevision else {
+            readinessLoadState = .failed
+            return
+        }
+        if case .success(let entries) = entryResult { self.entries = entries }
+        if case .success(let places) = placeResult { self.places = places }
+        if case .success = entryResult, case .success = placeResult {
+            readinessLoadState = .loaded
+        } else {
+            readinessLoadState = .failed
+        }
+    }
+
+    private func readinessEntriesResult() async -> Result<[TripEntry], Error> {
+        do { return .success(try await readinessAPI.loadEntries(tripId: trip.id)) }
+        catch { return .failure(error) }
+    }
+
+    private func readinessPlacesResult() async -> Result<[TripPlace], Error> {
+        do { return .success(try await readinessAPI.loadPlaces(tripId: trip.id)) }
+        catch { return .failure(error) }
+    }
+
     func updateSceneActivity(_ activity: TripDetailSceneActivity) {
         sceneActivity = activity
+        if activity != .active { readinessGeneration += 1 }
     }
 
     func removeEntry(id: String) {
+        entryRevision += 1
         entries.removeAll { $0.id == id }
     }
 
     func replaceEntry(_ updated: TripEntry) {
+        entryRevision += 1
         if let i = entries.firstIndex(where: { $0.id == updated.id }) {
             entries[i] = updated
         }
@@ -694,15 +744,22 @@ final class TripDetailViewModel: ObservableObject {
         if trip.isDraft {
             return "Trip must be published to submit."
         }
-        if trip.entryCount < 3 {
+        guard readinessLoadState == .loaded else {
+            return readinessLoadState == .failed
+                ? "We couldn't check entries and places. Retry to check Explore readiness."
+                : "Loading entries and places before checking Explore readiness."
+        }
+        if entries.count < 3 {
             return "Trip must have at least 3 entries."
         }
+        if places.isEmpty { return "Trip must have at least 1 place." }
         return nil
     }
 
     @discardableResult
     func submitForPublication(message: String?) async -> String? {
         guard !isSubmitting else { return "A submission is already in progress." }
+        if let error = submissionEligibilityError { return error }
         isSubmitting = true
         defer { isSubmitting = false }
         do {
@@ -740,6 +797,22 @@ protocol ItineraryAPIProviding {
 }
 
 extension APIClient: ItineraryAPIProviding {}
+
+@MainActor
+final class AddDayItemFormState: ObservableObject {
+    @Published var selectedType = "place"
+    @Published var title = ""
+    @Published var notes = ""
+    @Published var time = ""
+    @Published private(set) var saveError: String?
+
+    func save(day: TripDay, viewModel: ItineraryViewModel) async -> Bool {
+        saveError = nil
+        saveError = await viewModel.addItem(
+            to: day, type: selectedType, title: title, notes: notes, time: time)
+        return saveError == nil
+    }
+}
 
 struct TripDetailView: View {
     @StateObject private var viewModel: TripDetailViewModel
@@ -979,12 +1052,25 @@ struct TripDetailView: View {
                     )
                     submissionRequirement(
                         "At least three entries",
-                        met: currentTrip.entryCount >= 3
+                        met: viewModel.readinessLoadState == .loaded && viewModel.entries.count >= 3
                     )
                     submissionRequirement(
                         "At least one place",
-                        met: !viewModel.places.isEmpty
+                        met: viewModel.readinessLoadState == .loaded && !viewModel.places.isEmpty
                     )
+                    if viewModel.readinessLoadState != .loaded {
+                        Text(viewModel.readinessLoadState == .failed
+                             ? "Couldn't check entries and places. Please retry."
+                             : "Loading entries and places…")
+                            .font(.bpCallout)
+                            .foregroundColor(.bpTextSecondary)
+                        if viewModel.readinessLoadState == .failed {
+                            Button("Retry readiness check") {
+                                Task { await viewModel.loadReadiness() }
+                            }
+                            .foregroundColor(.bpCobalt)
+                        }
+                    }
                 }
                 .padding(.horizontal, 20)
                 .padding(.bottom, 16)
@@ -1033,10 +1119,6 @@ struct TripDetailView: View {
                             submitError = eligibilityError
                             return
                         }
-                        if viewModel.places.isEmpty {
-                            submitError = "Trip must have at least 1 place."
-                            return
-                        }
                         let error = await viewModel.submitForPublication(
                             message: submitMessage.isEmpty ? nil : submitMessage
                         )
@@ -1050,7 +1132,6 @@ struct TripDetailView: View {
                 }
                 .disabled(
                     viewModel.submissionEligibilityError != nil
-                    || viewModel.places.isEmpty
                     || viewModel.isSubmitting
                 )
                 .padding(20)
@@ -1983,6 +2064,10 @@ struct EntryDetailView: View {
                      title: String,
                      notes: String?,
                      time: String?) async -> String? {
+            if let message = DayItemInputValidation.error(title: title, notes: notes, time: time) {
+                error = message
+                return message
+            }
             guard let currentDay = days.first(where: { $0.id == day.id }) else {
                 let message = "This itinerary day is no longer available."
                 error = message
@@ -1996,8 +2081,8 @@ struct EntryDetailView: View {
                 let body = CreateDayItemRequest(
                     type: type,
                     title: title,
-                    notes: notes,
-                    time: time,
+                    notes: DayItemInputValidation.optionalValue(notes),
+                    time: DayItemInputValidation.normalizedTime(time),
                     orderIndex: nextOrder,
                     placeId: nil)
                 let newItem = try await api.createDayItem(
@@ -2799,11 +2884,7 @@ struct EntryDetailView: View {
         @ObservedObject var viewModel: ItineraryViewModel
         @Environment(\.dismiss) var dismiss
 
-        @State private var selectedType = "place"
-        @State private var title = ""
-        @State private var notes = ""
-        @State private var time = ""
-        @State private var saveError: String? = nil
+        @StateObject private var form = AddDayItemFormState()
 
         let types = [
             ("place", "mappin", "Place"),
@@ -2819,7 +2900,7 @@ struct EntryDetailView: View {
                         ForEach(types, id: \.0) {
                             type, icon, label in
                             Button {
-                                selectedType = type
+                                form.selectedType = type
                             } label: {
                                 VStack(spacing: 6) {
                                     Image(systemName: icon)
@@ -2829,12 +2910,12 @@ struct EntryDetailView: View {
                                         .font(.bpCaption)
                                 }
                                 .foregroundColor(
-                                    selectedType == type
+                                    form.selectedType == type
                                     ? .bpCobalt : .bpStone)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 12)
                                 .background(
-                                    selectedType == type
+                                    form.selectedType == type
                                     ? Color.bpCobalt
                                         .opacity(0.08)
                                     : Color.clear)
@@ -2845,11 +2926,11 @@ struct EntryDetailView: View {
                                     RoundedRectangle(
                                         cornerRadius: 10)
                                     .stroke(
-                                        selectedType == type
+                                        form.selectedType == type
                                         ? Color.bpCobalt
                                         : Color.bpBorder,
                                         lineWidth:
-                                        selectedType == type
+                                        form.selectedType == type
                                         ? 1.5 : 1))
                             }
                             .buttonStyle(.plain)
@@ -2865,7 +2946,7 @@ struct EntryDetailView: View {
                             .foregroundColor(.bpTextMuted)
                             .tracking(1.0)
                         TextField(titlePlaceholder,
-                            text: $title)
+                            text: $form.title)
                             .font(.bpSubhead)
                             .foregroundColor(.bpInk)
                     }
@@ -2879,7 +2960,7 @@ struct EntryDetailView: View {
                             .foregroundColor(.bpTextMuted)
                             .tracking(1.0)
                         TextField("e.g. 09:00",
-                            text: $time)
+                            text: $form.time)
                             .font(.bpBody)
                             .foregroundColor(.bpInk)
                             .keyboardType(.numbersAndPunctuation)
@@ -2894,7 +2975,7 @@ struct EntryDetailView: View {
                             .foregroundColor(.bpTextMuted)
                             .tracking(1.0)
                         TextField("Any details...",
-                            text: $notes,
+                            text: $form.notes,
                             axis: .vertical)
                             .font(.bpBody)
                             .foregroundColor(.bpInk)
@@ -2902,7 +2983,7 @@ struct EntryDetailView: View {
                     }
                     .padding(16)
 
-                    if let saveError {
+                    if let saveError = form.saveError {
                         HStack(spacing: 8) {
                             Image(systemName: "exclamationmark.circle")
                                 .foregroundColor(.bpError)
@@ -2924,8 +3005,7 @@ struct EntryDetailView: View {
                     ) {
                         Task { await save() }
                     }
-                    .disabled(title.trimmingCharacters(
-                        in: .whitespaces).isEmpty || viewModel.isMutating)
+                    .disabled(viewModel.isMutating)
                     .padding(16)
                 }
                 .background(Color.bpBackground)
@@ -2953,23 +3033,13 @@ struct EntryDetailView: View {
         }
 
         private func save() async {
-            saveError = nil
-            let error = await viewModel.addItem(
-                to: day,
-                type: selectedType,
-                title: title,
-                notes: notes.isEmpty ? nil : notes,
-                time: time.isEmpty ? nil : time
-            )
-            if let error {
-                saveError = error
-            } else {
+            if await form.save(day: day, viewModel: viewModel) {
                 dismiss()
             }
         }
 
         private var titlePlaceholder: String {
-            switch selectedType {
+            switch form.selectedType {
             case "place": return "e.g. Sagrada Família"
             case "transport": return "e.g. Train to Barcelona"
             case "accommodation": return "e.g. Hotel Arts"
