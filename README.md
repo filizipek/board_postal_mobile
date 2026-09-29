@@ -31,13 +31,6 @@ BoardPostal/
 
 The app starts in `BoardPostalApp.swift` and presents four primary tabs: **Trips, Explore, Map, and Profile**. Feature views and view models live in the app source directory; `APIClient.swift` and `Endpoints.swift` handle communication with the backend.
 
-## Run locally
-
-1. Open `BoardPostal/BoardPostal.xcodeproj` in Xcode on a Mac.
-2. Set `API_BASE_URL` in `BoardPostal/BoardPostal/Config/Debug.xcconfig` to a reachable BoardPostal API. The app requires the separate backend for account and trip data.
-3. Select the **BoardPostal** scheme and an iPhone simulator or device, then run.
-4. Run the **BoardPostal** test action in Xcode to execute the iOS test target.
-
 The app target is configured for **iOS 17.6+**. A local build requires Xcode with an SDK and simulator compatible with the project settings. Some flows need an account and access to the configured API.
 
 ## About this repository
